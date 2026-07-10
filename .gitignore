@@ -1,0 +1,12 @@
+node_modules/
+.env
+.env.*
+!.env.example
+runs/
+logs/
+*.log
+*.key
+*.pem
+config.toml
+.DS_Store
+Thumbs.db

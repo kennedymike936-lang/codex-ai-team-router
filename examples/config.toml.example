@@ -1,0 +1,11 @@
+# Replace both paths with absolute paths on your computer.
+[mcp_servers.ai_team_mcp]
+command = 'C:\Program Files\nodejs\node.exe'
+args = ['C:\absolute\path\codex-ai-team-router\mcp-server\server.mjs']
+startup_timeout_sec = 60
+
+[mcp_servers.ai_team_mcp.env]
+QWEN_MCP_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
+QWEN_MCP_MODEL = 'qwen3.7-plus'
+DEEPSEEK_MCP_BASE_URL = 'https://api.deepseek.com/anthropic'
+DEEPSEEK_MCP_MODEL = 'deepseek-v4-pro[1m]'
