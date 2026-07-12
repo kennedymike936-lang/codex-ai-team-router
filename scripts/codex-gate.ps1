@@ -1,10 +1,19 @@
 [CmdletBinding()]
 param(
   [string]$Cwd = (Get-Location).Path,
+  [string]$TaskId = "",
+  [string]$Task = "",
+  [ValidateRange(1, 2)]
+  [int]$Attempt = 1,
+  [ValidateSet("pass", "partial", "unknown", "fail")]
+  [string]$RequirementStatus = "pass",
+  [string[]]$AllowedPath = @(),
+  [string]$WorkerRunDir = "",
   [int]$MaxDiffLines = 800,
   [int]$MaxChangedFiles = 25,
   [int]$CommandTimeoutSec = 180,
-  [string]$OutRoot = (Join-Path $env:USERPROFILE ".codex-ai-team\runs")
+  [string]$OutRoot = (Join-Path $env:USERPROFILE ".codex-ai-team\runs"),
+  [switch]$JsonOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -93,6 +102,19 @@ function Has-Script {
   return $null
 }
 
+function Test-PathAllowed {
+  param([string]$File, [string[]]$Roots)
+  if ($Roots.Count -eq 0) { return $true }
+  $normalizedFile = $File.Replace("\", "/").TrimStart("./")
+  foreach ($root in $Roots) {
+    $normalizedRoot = $root.Replace("\", "/").Trim("/").TrimStart("./")
+    if ($normalizedFile -eq $normalizedRoot -or $normalizedFile.StartsWith("$normalizedRoot/", [System.StringComparison]::OrdinalIgnoreCase)) {
+      return $true
+    }
+  }
+  return $false
+}
+
 if (-not (Test-Path -LiteralPath $Cwd)) {
   throw "Cwd does not exist: $Cwd"
 }
@@ -102,13 +124,20 @@ $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $runDir = Join-Path $OutRoot "$timestamp-gate"
 New-Item -ItemType Directory -Force -Path $runDir | Out-Null
 $reportPath = Join-Path $runDir "gate.md"
+$handoffPath = Join-Path $runDir "handoff.json"
+if ([string]::IsNullOrWhiteSpace($TaskId)) {
+  $TaskId = "task-$timestamp-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+}
 
 Push-Location $Cwd
 try {
   $isGit = $false
   try {
     git rev-parse --is-inside-work-tree *> $null
-    if ($LASTEXITCODE -eq 0) { $isGit = $true }
+    if ($LASTEXITCODE -eq 0) {
+      git rev-parse --verify HEAD *> $null
+      if ($LASTEXITCODE -eq 0) { $isGit = $true }
+    }
   } catch {}
 
   $changedFiles = @()
@@ -116,6 +145,7 @@ try {
   $dependencyFiles = @()
   $forbiddenFiles = @()
   $secretHits = @()
+  $scopeViolations = @()
 
   $forbiddenPatterns = @(
     ".env",
@@ -140,11 +170,11 @@ try {
   )
 
   if ($isGit) {
-    $changedFiles = @(git diff --name-only)
+    $changedFiles = @(git diff HEAD --name-only)
     $untrackedFiles = @(git ls-files --others --exclude-standard)
     $changedFiles = @($changedFiles + $untrackedFiles | Where-Object { $_ } | Select-Object -Unique)
 
-    $numstat = @(git diff --numstat)
+    $numstat = @(git diff HEAD --numstat)
     foreach ($line in $numstat) {
       $parts = $line -split "\s+"
       if ($parts.Count -ge 3) {
@@ -157,6 +187,9 @@ try {
     }
 
     foreach ($file in $changedFiles) {
+      if (-not (Test-PathAllowed -File $file -Roots $AllowedPath)) {
+        $scopeViolations += $file
+      }
       foreach ($pattern in $forbiddenPatterns) {
         if ($file -like $pattern -or $file -like "*/$pattern") {
           $forbiddenFiles += $file
@@ -169,7 +202,7 @@ try {
       }
     }
 
-    $diffText = git diff -U0
+    $diffText = git diff HEAD -U0
     $secretPatterns = @(
       "sk-[A-Za-z0-9_-]{20,}",
       "api[_-]?key\s*[:=]",
@@ -180,6 +213,18 @@ try {
       $matches = @($diffText | Select-String -Pattern $pattern -AllMatches)
       foreach ($match in $matches) {
         $secretHits += $match.Line
+      }
+    }
+
+    foreach ($file in $untrackedFiles) {
+      $absoluteFile = Join-Path $Cwd $file
+      if ((Test-Path -LiteralPath $absoluteFile -PathType Leaf) -and (Get-Item -LiteralPath $absoluteFile).Length -le 1MB) {
+        foreach ($pattern in $secretPatterns) {
+          if (Select-String -LiteralPath $absoluteFile -Pattern $pattern -Quiet -ErrorAction SilentlyContinue) {
+            $secretHits += "secret-like content in untracked file: $file"
+            break
+          }
+        }
       }
     }
   }
@@ -211,23 +256,103 @@ try {
   if (-not $isGit) { $hardFails += "not a git repository, cannot inspect diff safely" }
   if ($forbiddenFiles.Count -gt 0) { $hardFails += "forbidden files changed" }
   if ($secretHits.Count -gt 0) { $hardFails += "possible API key or secret in diff" }
+  if ($scopeViolations.Count -gt 0) { $hardFails += "files changed outside allowed paths" }
   if ($changedFiles.Count -gt $MaxChangedFiles) { $hardFails += "too many changed files: $($changedFiles.Count)" }
   if ($diffLines -gt $MaxDiffLines) { $hardFails += "diff too large: $diffLines lines" }
+  if ($RequirementStatus -eq "fail") { $hardFails += "worker did not satisfy the requested outcome" }
   foreach ($step in $steps) {
     if ($step.Status -ne "pass") {
       $hardFails += "$($step.Name) did not pass"
     }
   }
 
+  $score = 95
+  if ($RequirementStatus -eq "unknown") { $score -= 10 }
+  if ($RequirementStatus -eq "partial") { $score -= 15 }
+  if ($dependencyFiles.Count -gt 0) { $score -= 5 }
+  if ($diffLines -gt [math]::Floor($MaxDiffLines * 0.75)) { $score -= 5 }
+  if ($changedFiles.Count -gt [math]::Floor($MaxChangedFiles * 0.75)) { $score -= 5 }
+  if ($hardFails.Count -gt 0) { $score = [math]::Min($score, 70) }
+  $score = [math]::Max(0, $score)
+
+  $decision = "accept"
+  $decisionReason = "Quality target reached; further polishing is optional."
+  if ($hardFails.Count -gt 0) {
+    $decision = "takeover"
+    $decisionReason = "A hard gate failed; Codex should take control immediately."
+  } elseif ($score -lt 80) {
+    $decision = "takeover"
+    $decisionReason = "Quality is below the worker recovery threshold."
+  } elseif ($score -lt 90 -and $Attempt -ge 2) {
+    $decision = "takeover"
+    $decisionReason = "The single targeted retry was already used."
+  } elseif ($score -lt 90) {
+    $decision = "retry"
+    $decisionReason = "One targeted worker retry is allowed before Codex takes over."
+  }
+
+  function Get-StepStatus([string]$Name) {
+    $matched = @($steps | Where-Object Name -eq $Name)
+    if ($matched.Count -eq 0) { return "not_detected" }
+    return [string]$matched[0].Status
+  }
+
+  $handoff = [ordered]@{
+    schema_version = "1.0"
+    task_id = $TaskId
+    task = $Task
+    generated_at = (Get-Date).ToUniversalTime().ToString("o")
+    attempt = $Attempt
+    decision = $decision
+    score = $score
+    reason = $decisionReason
+    hard_failures = @($hardFails)
+    requirement_status = $RequirementStatus
+    checks = [ordered]@{
+      build = Get-StepStatus "code can run/build"
+      tests = Get-StepStatus "tests"
+      typecheck = Get-StepStatus "type check"
+      lint = Get-StepStatus "lint"
+      scope = $(if ($scopeViolations.Count -eq 0) { "pass" } else { "fail" })
+      secrets = $(if ($secretHits.Count -eq 0) { "pass" } else { "fail" })
+      diff_size = $(if ($diffLines -le $MaxDiffLines -and $changedFiles.Count -le $MaxChangedFiles) { "pass" } else { "fail" })
+    }
+    changed_files = @($changedFiles)
+    scope_violations = @($scopeViolations)
+    dependency_files = @($dependencyFiles | Select-Object -Unique)
+    metrics = [ordered]@{
+      changed_files = $changedFiles.Count
+      diff_lines = $diffLines
+      max_changed_files = $MaxChangedFiles
+      max_diff_lines = $MaxDiffLines
+    }
+    artifacts = [ordered]@{
+      gate_report = $reportPath
+      handoff = $handoffPath
+      worker_run = $WorkerRunDir
+    }
+    retry = [ordered]@{
+      allowed = ($decision -eq "retry")
+      remaining = $(if ($decision -eq "retry") { 1 } else { 0 })
+      instruction = $(if ($decision -eq "retry") { "Fix only failed or incomplete checks, keep the diff bounded, then run the gate with Attempt=2." } else { "" })
+    }
+    codex_takeover = [ordered]@{
+      required = ($decision -eq "takeover")
+      instruction = $(if ($decision -eq "takeover") { "Read this handoff and referenced artifacts, restore a working deliverable first, then diagnose the worker failure." } else { "" })
+    }
+  }
+  $handoff | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $handoffPath -Encoding UTF8
+
   $lines = @()
   $lines += "# Codex Worker Gate"
   $lines += ""
-  if ($hardFails.Count -eq 0) {
-    $lines += "Overall: PASS"
-  } else {
-    $lines += "Overall: CHECK"
-  }
+  $lines += "Decision: $($decision.ToUpperInvariant())"
+  $lines += "Quality score: $score / 100"
+  $lines += "Reason: $decisionReason"
   $lines += ""
+  $lines += "Task ID: $TaskId"
+  $lines += "Attempt: $Attempt / 2"
+  $lines += "Requirement status: $RequirementStatus"
   $lines += "Workspace: $Cwd"
   $lines += "Git repository: $isGit"
   $lines += "Changed files: $($changedFiles.Count)"
@@ -235,6 +360,7 @@ try {
   $lines += "Dependency files changed: $($dependencyFiles.Count)"
   $lines += "Forbidden files changed: $($forbiddenFiles.Count)"
   $lines += "Secret/API-key hits: $($secretHits.Count)"
+  $lines += "Scope violations: $($scopeViolations.Count)"
   $lines += ""
   $lines += "## Gate Criteria"
   $lines += ""
@@ -280,6 +406,14 @@ try {
     $lines += ""
   }
 
+  if ($scopeViolations.Count -gt 0) {
+    $lines += "## Scope Violations"
+    foreach ($file in ($scopeViolations | Select-Object -Unique)) {
+      $lines += "- $file"
+    }
+    $lines += ""
+  }
+
   foreach ($step in $steps) {
     $lines += "## $($step.Name)"
     $lines += ""
@@ -294,10 +428,17 @@ try {
   }
 
   $lines | Set-Content -LiteralPath $reportPath -Encoding UTF8
-  Get-Content -LiteralPath $reportPath -Encoding UTF8
+  if ($JsonOnly) {
+    Get-Content -LiteralPath $handoffPath -Raw -Encoding UTF8
+  } else {
+    Get-Content -LiteralPath $reportPath -Encoding UTF8
+  }
 } finally {
   Pop-Location
 }
 
-Write-Host ""
-Write-Host "Gate report: $reportPath"
+if (-not $JsonOnly) {
+  Write-Host ""
+  Write-Host "Gate report: $reportPath"
+  Write-Host "Handoff: $handoffPath"
+}

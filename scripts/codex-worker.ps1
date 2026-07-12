@@ -9,6 +9,13 @@ param(
 
   [string]$Cwd = (Get-Location).Path,
 
+  [string]$TaskId = "",
+
+  [ValidateRange(1, 2)]
+  [int]$Attempt = 1,
+
+  [string[]]$AllowedPath = @(),
+
   [ValidateSet("auto", "default", "yolo", "plan")]
   [string]$Approval = "auto",
 
@@ -71,10 +78,14 @@ if (-not (Test-Path -LiteralPath $Cwd)) {
 
 Add-ToolPath
 $runDir = New-RunDir -Kind $Worker
+if ([string]::IsNullOrWhiteSpace($TaskId)) {
+  $TaskId = "task-$(Get-Date -Format 'yyyyMMdd-HHmmss')-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+}
 $taskPath = Join-Path $runDir "task.txt"
 $resultPath = Join-Path $runDir "result.txt"
 $summaryPath = Join-Path $runDir "summary.txt"
 $metaPath = Join-Path $runDir "meta.txt"
+$workerResultPath = Join-Path $runDir "worker-result.json"
 
 $Task | Set-Content -LiteralPath $taskPath -Encoding UTF8
 
@@ -82,8 +93,11 @@ $workerPrompt = @"
 You are a background worker called by Codex, who is the marshal and final reviewer.
 Do useful work directly when your tool mode allows it. Keep the task tightly scoped.
 Prefer making concrete progress over long discussion.
+This is attempt $Attempt of at most 2. If this is attempt 2, fix only the named failed checks.
 Do not touch secrets, payment data, accounts, unrelated user files, drivers, registry, or system settings unless the user task explicitly asks for it.
 Do not run long downloads or installations unless the task explicitly asks for that.
+Allowed paths: $(if ($AllowedPath.Count -gt 0) { $AllowedPath -join ', ' } else { 'the task-relevant files inside the current workspace' }).
+Do not modify files outside the allowed paths.
 At the end, report:
 - what you changed or produced
 - exact file paths changed
@@ -95,13 +109,18 @@ $Task
 "@
 
 $meta = @()
+$meta += "TaskId: $TaskId"
+$meta += "Attempt: $Attempt"
 $meta += "Worker: $Worker"
 $meta += "Cwd: $Cwd"
 $meta += "RunDir: $runDir"
 $meta += "Approval: $Approval"
 $meta += "MaxWallTime: $MaxWallTime"
+$meta += "AllowedPath: $($AllowedPath -join ', ')"
 $meta | Set-Content -LiteralPath $metaPath -Encoding UTF8
 
+$workerExitCode = $null
+$workerError = ""
 Push-Location $Cwd
 try {
   if ($Worker -eq "qwen") {
@@ -188,6 +207,10 @@ try {
     & claude @claudeArgs > $resultPath 2>&1
     $workerExitCode = $LASTEXITCODE
   }
+} catch {
+  $workerExitCode = 1
+  $workerError = $_.Exception.Message
+  "Worker failed before completing the task: $workerError" | Set-Content -LiteralPath $resultPath -Encoding UTF8
 } finally {
   Pop-Location
 }
@@ -197,6 +220,7 @@ Write-Host "Worker finished."
 Write-Host "RunDir: $runDir"
 Write-Host "Result: $resultPath"
 Write-Host "Summary: $summaryPath"
+Write-Host "WorkerResult: $workerResultPath"
 if ($null -ne $workerExitCode) {
   Write-Host "ExitCode: $workerExitCode"
 }
@@ -209,4 +233,45 @@ if (Test-Path -LiteralPath $resultPath) {
   }
   $summaryText | Set-Content -LiteralPath $summaryPath -Encoding UTF8
   Write-Host $summaryText
+} else {
+  $summaryText = "Worker produced no result file."
+  $summaryText | Set-Content -LiteralPath $summaryPath -Encoding UTF8
 }
+
+$changedFiles = @()
+try {
+  Push-Location $Cwd
+  git rev-parse --is-inside-work-tree *> $null
+  if ($LASTEXITCODE -eq 0) {
+    $changedFiles = @(git diff HEAD --name-only)
+    $changedFiles += @(git ls-files --others --exclude-standard)
+    $changedFiles = @($changedFiles | Where-Object { $_ } | Select-Object -Unique)
+  }
+} catch {
+  $changedFiles = @()
+} finally {
+  Pop-Location
+}
+
+$workerStatus = $(if ($workerExitCode -eq 0) { "success" } else { "failed" })
+$workerResult = [ordered]@{
+  schema_version = "1.0"
+  task_id = $TaskId
+  task = $Task
+  attempt = $Attempt
+  worker = $Worker
+  status = $workerStatus
+  exit_code = $workerExitCode
+  error = $workerError
+  summary = $summaryText
+  changed_files = @($changedFiles)
+  allowed_paths = @($AllowedPath)
+  artifacts = [ordered]@{
+    run_dir = $runDir
+    full_result = $resultPath
+    summary = $summaryPath
+    metadata = $metaPath
+    worker_result = $workerResultPath
+  }
+}
+$workerResult | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $workerResultPath -Encoding UTF8

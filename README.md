@@ -4,7 +4,7 @@
 
 项目通过一个轻量 MCP Router 自动选择副手，并用本地 PowerShell 脚本完成项目侦查、受控执行和验收报告。完整过程保存在磁盘中，Codex 只接收紧凑摘要，避免命令输出和长日志持续撑大主对话上下文。
 
-> 目标不是追求最低 token，而是在能力、速度、费用和上下文体积之间取得实用平衡。
+> 目标不是追求最低 token，而是以合理成本稳定交付 90～95 分的结果；低于质量底线时，Codex 立即接管。
 
 ## 工作模式
 
@@ -21,7 +21,10 @@ flowchart LR
     W --> A
     A --> C
     C --> G[Gate\n构建 / 测试 / 类型 / lint / diff / secrets]
-    G --> O[最终结果]
+    G --> E{质量决策}
+    E -->|90～100| O[接受并交付]
+    E -->|80～89 / 首次| W
+    E -->|低于 80 / 硬失败 / 已返工| T[Codex 全盘接管]
 ```
 
 角色划分：
@@ -36,7 +39,7 @@ flowchart LR
 为 Qwen 和 DeepSeek 各加载一套 MCP，会让每个 Codex 会话都携带更多工具定义和参数说明。本项目只暴露两个工具：
 
 - `delegate_task`：自动路由任务；`dry_run=true` 时只预览路由，不调用模型。
-- `worker_gate_review`：对 worker 产生的 diff 做轻量验收。
+- `worker_gate_review`：对结构化结果做确定性质量决策，也兼容原有的 diff 轻量审查。
 
 Qwen 和 DeepSeek 仍然是两条独立模型线路，只是通过一个入口调度。
 
@@ -49,6 +52,9 @@ Qwen 和 DeepSeek 仍然是两条独立模型线路，只是通过一个入口�
 - Worker 完整输出写入磁盘，默认仅返回最多 30 行 / 3000 字符摘要。
 - Scout 专门处理大目录、日志、文件定位和第一遍项目调查。
 - Gate 检查构建、测试、类型检查、lint、diff 大小、依赖变化和密钥痕迹。
+- 质量策略固定为：90 分以上接受、80～89 分只返工一次、低于 80 分由 Codex 接管。
+- 构建/测试失败、密钥痕迹、越界修改等硬故障会跳过返工，立即要求 Codex 接管。
+- Worker 和 Gate 都生成 JSON 交接文件，Codex 接手时无需重新扫描整个项目。
 - API key 只从环境变量读取，不写入代码或 Codex 配置示例。
 - Router 基于 Node.js；本地 worker 脚本面向 Windows PowerShell。
 
@@ -58,12 +64,15 @@ Qwen 和 DeepSeek 仍然是两条独立模型线路，只是通过一个入口�
 codex-ai-team-router/
 ├─ mcp-server/
 │  ├─ server.mjs          # Qwen / DeepSeek MCP 总控路由器
+│  ├─ quality-policy.mjs  # 确定性质量评分和接管状态机
 │  ├─ smoke-test.mjs      # 不调用 API 的冒烟测试
+│  ├─ quality-policy-test.mjs
 │  └─ package.json
 ├─ scripts/
 │  ├─ codex-scout.ps1     # 只读侦查，返回短结论
 │  ├─ codex-worker.ps1    # Qwen Code / Claude Code-DeepSeek 执行器
-│  └─ codex-gate.ps1      # 本地验收脚本
+│  ├─ codex-gate.ps1      # 本地验收与交接包生成器
+│  └─ codex-gate-test.ps1
 ├─ examples/
 │  ├─ AGENTS.md
 │  └─ config.toml.example
@@ -195,6 +204,50 @@ worker_gate_review
 }
 ```
 
+确定性质量决策（不调用模型 API）：
+
+```json
+{
+  "evaluation": {
+    "task_id": "login-fix-001",
+    "attempt": 1,
+    "scores": {
+      "functionality": 35,
+      "requirements": 20,
+      "code_quality": 10,
+      "safety": 10,
+      "maintainability": 10
+    },
+    "hard_failures": [],
+    "summary": "核心流程已修复，但缺少一个边界测试。",
+    "changed_files": ["src/login.ts", "test/login.test.ts"]
+  }
+}
+```
+
+该示例得到 85 分，第一次返回 `retry`；相同任务以 `attempt: 2` 再次得到 85 分时返回 `takeover`。
+
+## 质量优先接管策略
+
+质量分用于表达**交付置信度**，不是宣称可以用数学精确衡量代码。评分满分 100：
+
+| 维度 | 分值 |
+|---|---:|
+| 核心功能、构建和测试 | 40 |
+| 需求完成度 | 25 |
+| 类型、lint 和代码质量 | 15 |
+| 安全与修改范围 | 10 |
+| 可维护性 | 10 |
+
+决策规则：
+
+- `90～100`：接受结果，停止无收益的精雕细琢。
+- `80～89`：第一次只修失败项；第二次仍未达到 90 分，由 Codex 接管。
+- `< 80`：不继续烧 worker token，Codex 直接接管。
+- 任意硬故障：无视分数，立即接管。
+
+硬故障包括构建/测试/类型/lint 失败、疑似密钥、禁止文件、超出允许路径、diff 失控和需求明确失败。接管顺序是先恢复可交付状态，再分析 worker 为什么失手；复盘不能阻塞修复。
+
 ## Scout：把大范围调查交给副手
 
 Scout 不修改文件，适合：
@@ -226,6 +279,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-worker.ps1 `
   -Worker qwen `
   -Task "在 src/utils 中补齐重复的输入校验，并运行已有测试" `
   -Cwd "C:\path\to\project" `
+  -TaskId "input-validation-001" `
+  -Attempt 1 `
+  -AllowedPath @("src/utils", "test") `
   -Approval auto `
   -MaxWallTime 8m
 ```
@@ -246,7 +302,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-worker.ps1 `
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-gate.ps1 `
-  -Cwd "C:\path\to\git-project"
+  -Cwd "C:\path\to\git-project" `
+  -TaskId "input-validation-001" `
+  -Task "补齐输入校验并运行测试" `
+  -Attempt 1 `
+  -RequirementStatus pass `
+  -AllowedPath @("src/utils", "test")
 ```
 
 Gate 会尽可能检查：
@@ -260,7 +321,14 @@ Gate 会尽可能检查：
 7. 是否改动依赖文件
 8. diff 是否包含疑似 API key / private key
 
-Gate 依赖 Git diff；非 Git 目录会返回 `CHECK`，而不是误报 `PASS`。
+Gate 会在运行目录下写入：
+
+- `gate.md`：供人阅读的检查报告。
+- `handoff.json`：供 Codex 接管的精简状态包，包含任务、分数、失败项、修改文件和完整产物路径。
+
+`RequirementStatus` 可设为 `pass`、`partial`、`unknown` 或 `fail`。只有确认核心需求已完成时才使用 `pass`；`unknown` 会降低置信度并触发一次定向返工。Gate 依赖 Git diff；非 Git 目录属于硬故障并要求 Codex 接管。
+
+第二次返工时保持同一个 `TaskId`，将 `Attempt` 改为 `2`。如果仍低于 90 分，Gate 会输出 `takeover`，Codex 直接读取 `handoff.json` 和其中引用的 worker 产物继续工作。
 
 ## Token 节省原理
 

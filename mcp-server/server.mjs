@@ -5,6 +5,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { evaluateWorkerResult } from "./quality-policy.mjs";
 
 const DEFAULT_CHECKLIST = [
   "code can run/build",
@@ -279,24 +280,48 @@ const tools = [
   },
   {
     name: "worker_gate_review",
-    description: "Review a diff against Codex's lightweight safety gate.",
+    description: "Evaluate a worker result. Structured evaluations use the deterministic quality/takeover policy; diff-only calls use a lightweight model review.",
     inputSchema: {
       type: "object",
       properties: {
         diff: { type: "string" },
+        evaluation: {
+          type: "object",
+          properties: {
+            task_id: { type: "string" },
+            task: { type: "string" },
+            attempt: { type: "integer", minimum: 1, maximum: 2 },
+            scores: {
+              type: "object",
+              properties: {
+                functionality: { type: "number", minimum: 0, maximum: 40 },
+                requirements: { type: "number", minimum: 0, maximum: 25 },
+                code_quality: { type: "number", minimum: 0, maximum: 15 },
+                safety: { type: "number", minimum: 0, maximum: 10 },
+                maintainability: { type: "number", minimum: 0, maximum: 10 },
+              },
+              required: ["functionality", "requirements", "code_quality", "safety", "maintainability"],
+            },
+            hard_failures: { type: "array", items: { type: "string" } },
+            summary: { type: "string" },
+            checks: { type: "object" },
+            changed_files: { type: "array", items: { type: "string" } },
+            artifacts: { type: "object" },
+          },
+          required: ["scores"],
+        },
         checklist: {
           anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
         },
         preferred: { type: "string", enum: ["auto", "qwen", "deepseek", "both"] },
         budget: { type: "string", enum: ["low", "normal", "deep"] },
       },
-      required: ["diff"],
     },
   },
 ];
 
 const server = new Server(
-  { name: "ai-team-mcp-server", version: "0.1.0" },
+  { name: "ai-team-mcp-server", version: "0.2.0" },
   { capabilities: { tools: {} } },
 );
 
@@ -311,6 +336,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 
   if (name === "worker_gate_review") {
+    if (args.evaluation) {
+      return result(JSON.stringify(evaluateWorkerResult(args.evaluation), null, 2));
+    }
+    if (!args.diff) {
+      throw new Error("worker_gate_review requires either evaluation or diff.");
+    }
     const checklist = Array.isArray(args.checklist)
       ? args.checklist
       : args.checklist

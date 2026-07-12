@@ -26,6 +26,28 @@ if (!previewText.includes("deepseek")) {
   throw new Error(`Unexpected dry-run route: ${previewText}`);
 }
 
+const quality = await client.callTool({
+  name: "worker_gate_review",
+  arguments: {
+    evaluation: {
+      task_id: "smoke-quality",
+      attempt: 1,
+      scores: {
+        functionality: 35,
+        requirements: 20,
+        code_quality: 10,
+        safety: 10,
+        maintainability: 10,
+      },
+    },
+  },
+});
+const handoff = JSON.parse(quality.content?.[0]?.text || "{}");
+if (handoff.decision !== "retry" || handoff.score !== 85) {
+  throw new Error(`Unexpected quality decision: ${JSON.stringify(handoff)}`);
+}
+
 console.log(`MCP tools: ${names.join(", ")}`);
 console.log(`Dry run: ${previewText}`);
+console.log(`Quality gate: ${handoff.score} -> ${handoff.decision}`);
 await client.close();

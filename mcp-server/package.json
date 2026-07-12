@@ -1,6 +1,6 @@
 {
   "name": "codex-ai-team-router",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "private": true,
   "main": "server.mjs",
@@ -9,6 +9,7 @@
   },
   "scripts": {
     "start": "node server.mjs",
-    "smoke": "node smoke-test.mjs"
+    "smoke": "node smoke-test.mjs",
+    "test": "node quality-policy-test.mjs && node smoke-test.mjs && powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/codex-gate-test.ps1"
   }
 }
