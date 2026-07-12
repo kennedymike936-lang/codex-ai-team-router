@@ -118,6 +118,7 @@ function Test-PathAllowed {
 if (-not (Test-Path -LiteralPath $Cwd)) {
   throw "Cwd does not exist: $Cwd"
 }
+$Cwd = (Resolve-Path -LiteralPath $Cwd).Path
 
 Add-ToolPath
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
@@ -205,7 +206,7 @@ try {
     $diffText = git diff HEAD -U0
     $secretPatterns = @(
       "sk-[A-Za-z0-9_-]{20,}",
-      "api[_-]?key\s*[:=]",
+      '(?i)api[_-]?key\s*[:=]\s*[''"]?[^''"\s]{16,}',
       "Authorization:\s*Bearer\s+",
       "BEGIN (RSA|OPENSSH|PRIVATE) KEY"
     )

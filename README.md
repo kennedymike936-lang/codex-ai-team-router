@@ -46,6 +46,8 @@ Qwen 和 DeepSeek 仍然是两条独立模型线路，只是通过一个入口�
 ## 主要特性
 
 - 自动路由至 Qwen、DeepSeek 或双轨并行。
+- 默认从服务商 `/models` 接口发现账号当前可用模型，并按代际与 `Flash / Plus / Pro` 档位自动选择。
+- 模型列表缓存一小时；新一代稳定别名上线后无需修改配置，模型不可用时同服务商最多回退一次。
 - `dry_run` 路由预览，不消耗模型 API。
 - 三档输出预算：`low`、`normal`、`deep`。
 - MCP 返回结果有字符上限，避免异常长回复进入 Codex 上下文。
@@ -58,6 +60,31 @@ Qwen 和 DeepSeek 仍然是两条独立模型线路，只是通过一个入口�
 - API key 只从环境变量读取，不写入代码或 Codex 配置示例。
 - Router 基于 Node.js；本地 worker 脚本面向 Windows PowerShell。
 
+## 自动模型选择
+
+默认 `AI_TEAM_MODEL_MODE=auto`，固定的模型名称不是必填配置。MCP 和 PowerShell Worker 都会先读取账号可见的 `/models` 列表，然后：
+
+| 预算 | Qwen | DeepSeek |
+|---|---|---|
+| `low` | 最新稳定 `flash` | 最新稳定 `flash` |
+| `normal` | 最新稳定 `plus` | 最新稳定 `pro` |
+| `deep` | 最新稳定 `plus` | 最新稳定 `pro` |
+
+选择器按模型家族和数字代际判断，不把某个版本号永久写死。例如未来出现 `qwen3.8-plus` 或 `deepseek-v5-flash`，只要它出现在账号可用列表中，就会优先于旧代稳定模型。`preview`、实时、语音、视觉等不适合当前文本/代码 Worker 的变体会被排除。
+
+模型列表接口暂时不可用时，系统才使用内置保底名单；普通认证失败、限流或服务错误不会触发乱换模型。只有明确的“模型不存在/无权限”错误允许同服务商回退一次。
+
+如确实需要锁定模型，可配置：
+
+```toml
+[mcp_servers.ai_team_mcp.env]
+AI_TEAM_MODEL_MODE = 'fixed'
+QWEN_MCP_MODEL = 'your-model-id'
+DEEPSEEK_MCP_MODEL = 'your-model-id'
+```
+
+内置价格只用于估算，实际账单以服务商和地区为准。默认档位参考 [阿里云百炼模型价格](https://help.aliyun.com/zh/model-studio/model-pricing) 和 [DeepSeek 官方模型价格](https://api-docs.deepseek.com/zh-cn/quick_start/pricing)。
+
 ## 仓库结构
 
 ```text
@@ -65,6 +92,8 @@ codex-ai-team-router/
 ├─ mcp-server/
 │  ├─ server.mjs          # Qwen / DeepSeek MCP 总控路由器
 │  ├─ quality-policy.mjs  # 确定性质量评分和接管状态机
+│  ├─ model-selector.mjs  # 动态模型发现与性价比选择
+│  ├─ usage-ledger.mjs    # Token 与费用本地账本
 │  ├─ smoke-test.mjs      # 不调用 API 的冒烟测试
 │  ├─ quality-policy-test.mjs
 │  └─ package.json
@@ -76,6 +105,7 @@ codex-ai-team-router/
 ├─ examples/
 │  ├─ AGENTS.md
 │  └─ config.toml.example
+├─ benchmark/             # 8 项隔离训练场和隐藏验收
 ├─ install.ps1
 └─ README.md
 ```
@@ -154,10 +184,10 @@ startup_timeout_sec = 60
 
 [mcp_servers.ai_team_mcp.env]
 QWEN_MCP_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
-QWEN_MCP_MODEL = 'qwen3.7-plus'
 DEEPSEEK_MCP_BASE_URL = 'https://api.deepseek.com/anthropic'
-DEEPSEEK_MCP_MODEL = 'deepseek-v4-pro[1m]'
 ```
+
+不填写模型名即使用自动模式。
 
 用下面的命令查找 Node 绝对路径：
 
@@ -282,6 +312,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-worker.ps1 `
   -TaskId "input-validation-001" `
   -Attempt 1 `
   -AllowedPath @("src/utils", "test") `
+  -Budget low `
   -Approval auto `
   -MaxWallTime 8m
 ```
@@ -293,7 +324,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-worker.ps1 `
   -Worker deepseek `
   -Task "定位失败测试并提交最小修复" `
   -Cwd "C:\path\to\project" `
-  -DeepSeekMaxBudgetUsd 0.03
+  -DeepSeekMaxBudgetUsd 0.10
 ```
 
 `yolo` 会绕过更多确认，只应在低风险、可恢复的工作区使用。默认推荐 `auto`。
@@ -329,6 +360,51 @@ Gate 会在运行目录下写入：
 `RequirementStatus` 可设为 `pass`、`partial`、`unknown` 或 `fail`。只有确认核心需求已完成时才使用 `pass`；`unknown` 会降低置信度并触发一次定向返工。Gate 依赖 Git diff；非 Git 目录属于硬故障并要求 Codex 接管。
 
 第二次返工时保持同一个 `TaskId`，将 `Attempt` 改为 `2`。如果仍低于 90 分，Gate 会输出 `takeover`，Codex 直接读取 `handoff.json` 和其中引用的 worker 产物继续工作。
+
+## 成本账本
+
+MCP 请求会记录服务商返回的准确 Token 用量、模型、耗时、是否回退和按公开单价计算的费用估算：
+
+```text
+%USERPROFILE%\.codex-ai-team\usage\usage.jsonl
+```
+
+Qwen Code / Claude Code CLI 没有稳定统一的 Token 输出格式，因此 Worker 账本只记录可验证信息，不编造实际 Token：
+
+```text
+%USERPROFILE%\.codex-ai-team\usage\worker-runs.jsonl
+```
+
+DeepSeek Worker 默认使用 Qwen Code 的 OpenAI-compatible Agent 外壳，并在每次运行目录中生成不含密钥的临时 Provider 配置，声明 DeepSeek V4 的上下文能力；这避免 Claude Code 对第三方模型费用的错误估算。需要兼容旧流程时可显式传入 `-DeepSeekHarness claude`。
+
+可以手动执行极小的在线探针验证两个账号和自动选择。该命令会产生少量模型费用，不会被 `npm test` 自动执行：
+
+```powershell
+cd .\mcp-server
+npm run probe:live
+```
+
+## 8 项训练场
+
+训练场会为每项任务复制独立项目并初始化 Git，不碰真实工程。只准备任务不扣模型 Token：
+
+```powershell
+.\benchmark\run-benchmark.ps1 -TaskId T3
+```
+
+确认后执行：
+
+```powershell
+.\benchmark\run-benchmark.ps1 -TaskId T3 -Execute
+```
+
+任务清单、允许路径和验收目标见 [benchmark/tasks.json](benchmark/tasks.json)。代码任务会运行隐藏验收和 Gate，结果保存在 `%USERPROFILE%\.codex-ai-team\benchmark`。
+
+每次代码任务的模型、隐藏验收、质量分、决策和交接路径汇总在：
+
+```text
+%USERPROFILE%\.codex-ai-team\benchmark\benchmark-results.jsonl
+```
 
 ## Token 节省原理
 
@@ -383,7 +459,8 @@ AI_TEAM_TOOLS_DIR
 
 - 检查 `ANTHROPIC_API_KEY` 或 `ANTHROPIC_AUTH_TOKEN`。
 - 确认接口支持 Anthropic Messages 兼容格式。
-- 根据服务商实际模型名调整 `DEEPSEEK_MCP_MODEL`。
+- 运行 `npm run probe:live` 检查账号可见模型和自动选择结果。
+- 只有使用 `AI_TEAM_MODEL_MODE=fixed` 时才需要人工检查 `DEEPSEEK_MCP_MODEL`。
 
 ### Worker 卡住或输出过长
 

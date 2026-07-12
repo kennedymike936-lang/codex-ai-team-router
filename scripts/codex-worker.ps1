@@ -21,13 +21,21 @@ param(
 
   [string]$MaxWallTime = "8m",
 
-  [string]$QwenModel = "qwen3.7-plus",
+  [ValidateSet("low", "normal", "deep")]
+  [string]$Budget = "low",
 
-  [string]$DeepSeekModel = "deepseek-v4-pro[1m]",
+  [string]$QwenModel = "auto",
 
-  [decimal]$DeepSeekMaxBudgetUsd = 0.03,
+  [string]$DeepSeekModel = "auto",
+
+  [ValidateSet("qwen", "claude")]
+  [string]$DeepSeekHarness = "qwen",
+
+  [decimal]$DeepSeekMaxBudgetUsd = 0.10,
 
   [string]$OutRoot = (Join-Path $env:USERPROFILE ".codex-ai-team\runs"),
+
+  [string]$UsageLedger = (Join-Path $env:USERPROFILE ".codex-ai-team\usage\worker-runs.jsonl"),
 
   [int]$SummaryLines = 30,
 
@@ -72,9 +80,72 @@ function New-RunDir {
   return $dir
 }
 
+function Get-AvailableModelIds {
+  param([string]$Provider, [string]$BaseUrl, [string]$ApiKey)
+  try {
+    $modelsUrl = $BaseUrl.TrimEnd("/") + "/models"
+    if ($Provider -eq "deepseek") {
+      $modelsUrl = ($BaseUrl -replace "/anthropic(?:/v1)?/?$", "").TrimEnd("/") + "/models"
+    }
+    $response = Invoke-RestMethod -Uri $modelsUrl -Headers @{ Authorization = "Bearer $ApiKey" } -TimeoutSec 20
+    return @($response.data | ForEach-Object { [string]$_.id } | Where-Object { $_ })
+  } catch {
+    return @()
+  }
+}
+
+function Resolve-ValueModel {
+  param(
+    [string]$Provider,
+    [string]$RequestedModel,
+    [string]$BudgetTier,
+    [string]$BaseUrl,
+    [string]$ApiKey
+  )
+  if ($RequestedModel -and $RequestedModel -ne "auto") { return $RequestedModel }
+
+  $available = @(Get-AvailableModelIds -Provider $Provider -BaseUrl $BaseUrl -ApiKey $ApiKey)
+  if ($available.Count -gt 0) {
+    $preferredTier = $(if ($BudgetTier -eq "low") { "flash" } elseif ($Provider -eq "qwen") { "plus" } else { "pro" })
+    $recognized = @()
+    foreach ($modelId in $available) {
+      $match = $(if ($Provider -eq "qwen") {
+        [regex]::Match($modelId, "^qwen(?<version>\d+(?:\.\d+)?)-(?<tier>flash|plus)(?<snapshot>-\d{4}-\d{2}-\d{2})?$")
+      } else {
+        [regex]::Match($modelId, "^deepseek-v(?<version>\d+(?:\.\d+)?)-(?<tier>flash|pro)(?<snapshot>-\d{4}-\d{2}-\d{2})?$")
+      })
+      if ($match.Success) {
+        $recognized += [pscustomobject]@{
+          Id = $modelId
+          Version = [double]$match.Groups["version"].Value
+          Tier = $match.Groups["tier"].Value
+          StableAlias = [string]::IsNullOrWhiteSpace($match.Groups["snapshot"].Value)
+        }
+      }
+    }
+    $selected = @($recognized | Where-Object Tier -eq $preferredTier | Sort-Object Version, StableAlias -Descending | Select-Object -First 1)
+    if ($selected.Count -gt 0) { return $selected[0].Id }
+    $fallback = @($recognized | Sort-Object Version, StableAlias -Descending | Select-Object -First 1)
+    if ($fallback.Count -gt 0) { return $fallback[0].Id }
+  }
+
+  if ($Provider -eq "qwen") {
+    $candidates = $(if ($BudgetTier -eq "low") { @("qwen3.6-flash", "qwen3.7-plus") } else { @("qwen3.7-plus", "qwen3.6-flash") })
+  } else {
+    $candidates = $(if ($BudgetTier -eq "low") { @("deepseek-v4-flash", "deepseek-v4-pro") } else { @("deepseek-v4-pro", "deepseek-v4-flash") })
+  }
+  foreach ($candidate in $candidates) {
+    if ($available.Count -eq 0 -or $available -contains $candidate) {
+      return $candidate
+    }
+  }
+  return $candidates[0]
+}
+
 if (-not (Test-Path -LiteralPath $Cwd)) {
   throw "Cwd does not exist: $Cwd"
 }
+$Cwd = (Resolve-Path -LiteralPath $Cwd).Path
 
 Add-ToolPath
 $runDir = New-RunDir -Kind $Worker
@@ -115,12 +186,19 @@ $meta += "Worker: $Worker"
 $meta += "Cwd: $Cwd"
 $meta += "RunDir: $runDir"
 $meta += "Approval: $Approval"
+$meta += "Budget: $Budget"
+$meta += "DeepSeekHarness: $DeepSeekHarness"
 $meta += "MaxWallTime: $MaxWallTime"
 $meta += "AllowedPath: $($AllowedPath -join ', ')"
 $meta | Set-Content -LiteralPath $metaPath -Encoding UTF8
 
 $workerExitCode = $null
 $workerError = ""
+$selectedModel = ""
+$workerStartedAt = Get-Date
+if ($Approval -eq "yolo") {
+  $env:QWEN_CODE_SUPPRESS_YOLO_WARNING = "1"
+}
 Push-Location $Cwd
 try {
   if ($Worker -eq "qwen") {
@@ -142,11 +220,12 @@ try {
       $qwenBaseUrl = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     }
     $env:OPENAI_BASE_URL = $qwenBaseUrl
+    $selectedModel = Resolve-ValueModel -Provider "qwen" -RequestedModel $QwenModel -BudgetTier $Budget -BaseUrl $qwenBaseUrl -ApiKey $openaiKey
 
     $qwenArgs = @(
       "--prompt", $workerPrompt,
       "--auth-type", "openai",
-      "--model", $QwenModel,
+      "--model", $selectedModel,
       "--openai-base-url", $env:OPENAI_BASE_URL,
       "--approval-mode", $Approval,
       "--max-wall-time", $MaxWallTime,
@@ -178,34 +257,75 @@ try {
       $deepSeekBaseUrl = "https://api.deepseek.com/anthropic"
     }
     $env:ANTHROPIC_BASE_URL = $deepSeekBaseUrl
+    $selectedModel = Resolve-ValueModel -Provider "deepseek" -RequestedModel $DeepSeekModel -BudgetTier $Budget -BaseUrl $deepSeekBaseUrl -ApiKey $apiKey
     $env:ANTHROPIC_AUTH_TOKEN = $authToken
     $env:ANTHROPIC_API_KEY = $apiKey
-    $env:ANTHROPIC_MODEL = $DeepSeekModel
-    $env:ANTHROPIC_DEFAULT_OPUS_MODEL = $DeepSeekModel
-    $env:ANTHROPIC_DEFAULT_SONNET_MODEL = $DeepSeekModel
+    $env:ANTHROPIC_MODEL = $selectedModel
+    $env:ANTHROPIC_DEFAULT_OPUS_MODEL = $selectedModel
+    $env:ANTHROPIC_DEFAULT_SONNET_MODEL = $selectedModel
     $env:ANTHROPIC_DEFAULT_HAIKU_MODEL = "deepseek-v4-flash"
     $env:CLAUDE_CODE_SUBAGENT_MODEL = "deepseek-v4-flash"
 
-    $permissionMode = "auto"
-    if ($Approval -eq "yolo") {
-      $permissionMode = "bypassPermissions"
-    } elseif ($Approval -eq "plan") {
-      $permissionMode = "plan"
-    } elseif ($Approval -eq "default") {
-      $permissionMode = "default"
-    }
+    if ($DeepSeekHarness -eq "qwen") {
+      $deepSeekOpenAiBase = ($deepSeekBaseUrl -replace "/anthropic(?:/v1)?/?$", "").TrimEnd("/")
+      $env:OPENAI_API_KEY = $apiKey
+      $env:OPENAI_BASE_URL = $deepSeekOpenAiBase
+      $qwenHome = Join-Path $runDir "qwen-home"
+      New-Item -ItemType Directory -Force -Path $qwenHome | Out-Null
+      $env:QWEN_HOME = $qwenHome
+      $qwenSettings = [ordered]@{
+        modelProviders = [ordered]@{
+          openai = @([ordered]@{
+            id = $selectedModel
+            name = "$selectedModel (DeepSeek auto)"
+            envKey = "OPENAI_API_KEY"
+            baseUrl = $deepSeekOpenAiBase
+            generationConfig = [ordered]@{
+              contextWindowSize = 1000000
+              timeout = 120000
+              samplingParams = [ordered]@{ max_tokens = 8192 }
+            }
+          })
+        }
+        security = [ordered]@{ auth = [ordered]@{ selectedType = "openai" } }
+        model = [ordered]@{ name = $selectedModel }
+      }
+      $settingsPath = Join-Path $qwenHome "settings.json"
+      $settingsJson = $qwenSettings | ConvertTo-Json -Depth 8
+      [System.IO.File]::WriteAllText($settingsPath, $settingsJson, (New-Object System.Text.UTF8Encoding($false)))
+      $deepSeekArgs = @(
+        "--prompt", $workerPrompt,
+        "--auth-type", "openai",
+        "--model", $selectedModel,
+        "--approval-mode", $Approval,
+        "--max-wall-time", $MaxWallTime,
+        "--max-session-turns", "8",
+        "--output-format", "text"
+      )
+      & qwen @deepSeekArgs > $resultPath 2>&1
+      $workerExitCode = $LASTEXITCODE
+    } else {
+      $permissionMode = "auto"
+      if ($Approval -eq "yolo") {
+        $permissionMode = "bypassPermissions"
+      } elseif ($Approval -eq "plan") {
+        $permissionMode = "plan"
+      } elseif ($Approval -eq "default") {
+        $permissionMode = "default"
+      }
 
-    $claudeArgs = @(
-      "--print",
-      "--bare",
-      "--model", $DeepSeekModel,
-      "--permission-mode", $permissionMode,
-      "--max-budget-usd", ([string]$DeepSeekMaxBudgetUsd),
-      "--append-system-prompt", "Answer for Codex. Be concise. Codex is final reviewer.",
-      $workerPrompt
-    )
-    & claude @claudeArgs > $resultPath 2>&1
-    $workerExitCode = $LASTEXITCODE
+      $claudeArgs = @(
+        "--print",
+        "--bare",
+        "--model", $selectedModel,
+        "--permission-mode", $permissionMode,
+        "--max-budget-usd", ([string]$DeepSeekMaxBudgetUsd),
+        "--append-system-prompt", "Answer for Codex. Be concise. Codex is final reviewer.",
+        $workerPrompt
+      )
+      & claude @claudeArgs > $resultPath 2>&1
+      $workerExitCode = $LASTEXITCODE
+    }
   }
 } catch {
   $workerExitCode = 1
@@ -221,6 +341,7 @@ Write-Host "RunDir: $runDir"
 Write-Host "Result: $resultPath"
 Write-Host "Summary: $summaryPath"
 Write-Host "WorkerResult: $workerResultPath"
+Write-Host "Model: $selectedModel"
 if ($null -ne $workerExitCode) {
   Write-Host "ExitCode: $workerExitCode"
 }
@@ -260,6 +381,8 @@ $workerResult = [ordered]@{
   task = $Task
   attempt = $Attempt
   worker = $Worker
+  model = $selectedModel
+  budget = $Budget
   status = $workerStatus
   exit_code = $workerExitCode
   error = $workerError
@@ -275,3 +398,24 @@ $workerResult = [ordered]@{
   }
 }
 $workerResult | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $workerResultPath -Encoding UTF8
+
+$workerEndedAt = Get-Date
+$usageDir = Split-Path -Parent $UsageLedger
+if ($usageDir) { New-Item -ItemType Directory -Force -Path $usageDir | Out-Null }
+$ledgerEvent = [ordered]@{
+  schema_version = "1.0"
+  timestamp = $workerEndedAt.ToUniversalTime().ToString("o")
+  task_id = $TaskId
+  provider = $Worker
+  model = $selectedModel
+  budget = $Budget
+  success = ($workerStatus -eq "success")
+  latency_ms = [math]::Round(($workerEndedAt - $workerStartedAt).TotalMilliseconds)
+  input_tokens = $null
+  output_tokens = $null
+  actual_cost = $null
+  cost_note = $(if ($Worker -eq "deepseek" -and $DeepSeekHarness -eq "claude") { "CLI actual usage unavailable; Claude harness request cap was USD $DeepSeekMaxBudgetUsd" } else { "CLI actual usage unavailable" })
+  harness = $(if ($Worker -eq "deepseek") { $DeepSeekHarness } else { "qwen" })
+  worker_result = $workerResultPath
+}
+Add-Content -LiteralPath $UsageLedger -Value ($ledgerEvent | ConvertTo-Json -Compress) -Encoding UTF8

@@ -6,6 +6,8 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { evaluateWorkerResult } from "./quality-policy.mjs";
+import { isModelUnavailable, modelSelector } from "./model-selector.mjs";
+import { recordUsage, usageEvent, usageSummary } from "./usage-ledger.mjs";
 
 const DEFAULT_CHECKLIST = [
   "code can run/build",
@@ -48,10 +50,11 @@ function qwenConfig() {
       process.env.QWEN_MCP_BASE_URL ||
       process.env.OPENAI_BASE_URL ||
       "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    model:
+    configuredModel:
       process.env.QWEN_MCP_MODEL ||
       process.env.AI_TEAM_QWEN_MODEL ||
       "qwen3.7-plus",
+    mode: process.env.AI_TEAM_MODEL_MODE === "fixed" ? "fixed" : "auto",
   };
 }
 
@@ -67,10 +70,11 @@ function deepSeekConfig() {
       process.env.DEEPSEEK_MCP_BASE_URL ||
       process.env.ANTHROPIC_BASE_URL ||
       "https://api.deepseek.com/anthropic",
-    model:
+    configuredModel:
       process.env.DEEPSEEK_MCP_MODEL ||
       process.env.ANTHROPIC_MODEL ||
-      "deepseek-v4-pro[1m]",
+      "deepseek-v4-pro",
+    mode: process.env.AI_TEAM_MODEL_MODE === "fixed" ? "fixed" : "auto",
   };
 }
 
@@ -98,41 +102,75 @@ function schemaNote(outputSchema) {
   return `\nReturn output matching this schema or shape:\n${outputSchema}`;
 }
 
-async function callQwen({ task, context, outputSchema, maxTokens }) {
-  const { apiKey, baseUrl, model } = qwenConfig();
-  const url = `${baseUrl.replace(/\/$/, "")}/chat/completions`;
-  const body = {
-    model,
-    messages: [
-      { role: "system", content: baseSystem("Qwen") },
-      {
-        role: "user",
-        content: [
-          `Task:\n${task}`,
-          context ? `Context:\n${context}` : "",
-          schemaNote(outputSchema),
-        ].filter(Boolean).join("\n\n"),
-      },
-    ],
-    temperature: 0.2,
-    max_tokens: maxTokens,
-    stream: false,
+function openAiUsage(usage = {}) {
+  return {
+    input_tokens: usage.prompt_tokens || usage.input_tokens || 0,
+    output_tokens: usage.completion_tokens || usage.output_tokens || 0,
+    cache_read_tokens: usage.prompt_tokens_details?.cached_tokens || 0,
   };
+}
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify(body),
+function anthropicUsage(usage = {}) {
+  return {
+    input_tokens: usage.input_tokens || 0,
+    output_tokens: usage.output_tokens || 0,
+    cache_read_tokens: usage.cache_read_input_tokens || 0,
+  };
+}
+
+async function callQwen({ task, context, outputSchema, maxTokens, budget }) {
+  const { apiKey, baseUrl, configuredModel, mode } = qwenConfig();
+  const url = `${baseUrl.replace(/\/$/, "")}/chat/completions`;
+  const models = await modelSelector.candidates({
+    provider: "qwen", budget, configuredModel, mode, baseUrl, apiKey,
   });
-  const text = await response.text();
-  if (!response.ok) {
-    throw new Error(`Qwen ${response.status} ${response.statusText}: ${text.slice(0, 800)}`);
+  let lastError = "";
+
+  for (let index = 0; index < models.length; index += 1) {
+    const model = models[index];
+    const started = Date.now();
+    const body = {
+      model,
+      messages: [
+        { role: "system", content: baseSystem("Qwen") },
+        {
+          role: "user",
+          content: [
+            `Task:\n${task}`,
+            context ? `Context:\n${context}` : "",
+            schemaNote(outputSchema),
+          ].filter(Boolean).join("\n\n"),
+        },
+      ],
+      temperature: 0.2,
+      max_tokens: maxTokens,
+      stream: false,
+    };
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify(body),
+    });
+    const text = await response.text();
+    if (response.ok) {
+      const json = JSON.parse(text);
+      const event = usageEvent({
+        provider: "qwen", model, budget, usage: openAiUsage(json.usage),
+        latencyMs: Date.now() - started, fallbackCount: index,
+      });
+      await recordUsage(event);
+      return { text: json.choices?.[0]?.message?.content || text, event };
+    }
+    lastError = `Qwen ${response.status} ${response.statusText}: ${text.slice(0, 800)}`;
+    if (index + 1 < models.length && isModelUnavailable(response.status, text)) continue;
+    const event = usageEvent({
+      provider: "qwen", model, budget, latencyMs: Date.now() - started,
+      fallbackCount: index, success: false, error: lastError,
+    });
+    await recordUsage(event);
+    throw new Error(lastError);
   }
-  const json = JSON.parse(text);
-  return json.choices?.[0]?.message?.content || text;
+  throw new Error(lastError || "Qwen request failed: no value-tier model is available.");
 }
 
 function anthropicText(content) {
@@ -140,25 +178,12 @@ function anthropicText(content) {
   return content.map((part) => (typeof part?.text === "string" ? part.text : "")).filter(Boolean).join("\n");
 }
 
-async function callDeepSeek({ task, context, outputSchema, maxTokens }) {
-  const { apiKey, baseUrl, model } = deepSeekConfig();
+async function callDeepSeek({ task, context, outputSchema, maxTokens, budget }) {
+  const { apiKey, baseUrl, configuredModel, mode } = deepSeekConfig();
   const url = `${baseUrl.replace(/\/$/, "")}/v1/messages`;
-  const body = {
-    model,
-    max_tokens: maxTokens,
-    temperature: 0.2,
-    system: baseSystem("DeepSeek"),
-    messages: [
-      {
-        role: "user",
-        content: [
-          `Task:\n${task}`,
-          context ? `Context:\n${context}` : "",
-          schemaNote(outputSchema),
-        ].filter(Boolean).join("\n\n"),
-      },
-    ],
-  };
+  const models = await modelSelector.candidates({
+    provider: "deepseek", budget, configuredModel, mode, baseUrl, apiKey,
+  });
 
   const headerSets = [
     {
@@ -174,18 +199,50 @@ async function callDeepSeek({ task, context, outputSchema, maxTokens }) {
   ];
 
   let lastError = "";
-  for (const headers of headerSets) {
-    const response = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-    });
-    const text = await response.text();
-    if (response.ok) {
-      const json = JSON.parse(text);
-      return anthropicText(json.content) || text;
+  for (let index = 0; index < models.length; index += 1) {
+    const model = models[index];
+    const started = Date.now();
+    const body = {
+      model,
+      max_tokens: maxTokens,
+      temperature: 0.2,
+      system: baseSystem("DeepSeek"),
+      messages: [{
+        role: "user",
+        content: [
+          `Task:\n${task}`,
+          context ? `Context:\n${context}` : "",
+          schemaNote(outputSchema),
+        ].filter(Boolean).join("\n\n"),
+      }],
+    };
+    let unavailable = false;
+    for (let headerIndex = 0; headerIndex < headerSets.length; headerIndex += 1) {
+      const response = await fetch(url, {
+        method: "POST", headers: headerSets[headerIndex], body: JSON.stringify(body),
+      });
+      const text = await response.text();
+      if (response.ok) {
+        const json = JSON.parse(text);
+        const event = usageEvent({
+          provider: "deepseek", model, budget, usage: anthropicUsage(json.usage),
+          latencyMs: Date.now() - started, fallbackCount: index,
+        });
+        await recordUsage(event);
+        return { text: anthropicText(json.content) || text, event };
+      }
+      lastError = `DeepSeek ${response.status} ${response.statusText}: ${text.slice(0, 800)}`;
+      unavailable = isModelUnavailable(response.status, text);
+      if (response.status === 401 && headerIndex + 1 < headerSets.length) continue;
+      break;
     }
-    lastError = `DeepSeek ${response.status} ${response.statusText}: ${text.slice(0, 800)}`;
+    if (index + 1 < models.length && unavailable) continue;
+    const event = usageEvent({
+      provider: "deepseek", model, budget, latencyMs: Date.now() - started,
+      fallbackCount: index, success: false, error: lastError,
+    });
+    await recordUsage(event);
+    throw new Error(lastError);
   }
   throw new Error(lastError || "DeepSeek request failed.");
 }
@@ -227,6 +284,10 @@ function compactText(text, maxChars = 5000) {
   return `[truncated; full worker artifact should be used for details]\n${value.slice(0, maxChars)}`;
 }
 
+function formattedWorker(name, response, maxChars = 5000) {
+  return `Model: ${response.event.model}\nUsage: ${usageSummary(response.event)}\n\n${compactText(response.text, maxChars)}`;
+}
+
 async function delegate(args) {
   const preferred = args.preferred || "auto";
   const route = routeTask({
@@ -244,20 +305,20 @@ async function delegate(args) {
   }
 
   if (route === "qwen") {
-    const qwen = await callQwen({ task, context, outputSchema, maxTokens });
-    return `Route: qwen\n\n## Qwen\n${compactText(qwen)}`;
+    const qwen = await callQwen({ task, context, outputSchema, maxTokens, budget: args.budget || "low" });
+    return `Route: qwen\n\n## Qwen\n${formattedWorker("Qwen", qwen)}`;
   }
   if (route === "deepseek") {
-    const deepseek = await callDeepSeek({ task, context, outputSchema, maxTokens });
-    return `Route: deepseek\n\n## DeepSeek\n${compactText(deepseek)}`;
+    const deepseek = await callDeepSeek({ task, context, outputSchema, maxTokens, budget: args.budget || "low" });
+    return `Route: deepseek\n\n## DeepSeek\n${formattedWorker("DeepSeek", deepseek)}`;
   }
 
   const [qwen, deepseek] = await Promise.allSettled([
-    callQwen({ task, context, outputSchema, maxTokens }),
-    callDeepSeek({ task, context, outputSchema, maxTokens }),
+    callQwen({ task, context, outputSchema, maxTokens, budget: args.budget || "low" }),
+    callDeepSeek({ task, context, outputSchema, maxTokens, budget: args.budget || "low" }),
   ]);
-  const qwenText = qwen.status === "fulfilled" ? compactText(qwen.value, 3000) : `FAILED: ${qwen.reason?.message || qwen.reason}`;
-  const deepSeekText = deepseek.status === "fulfilled" ? compactText(deepseek.value, 3000) : `FAILED: ${deepseek.reason?.message || deepseek.reason}`;
+  const qwenText = qwen.status === "fulfilled" ? formattedWorker("Qwen", qwen.value, 3000) : `FAILED: ${qwen.reason?.message || qwen.reason}`;
+  const deepSeekText = deepseek.status === "fulfilled" ? formattedWorker("DeepSeek", deepseek.value, 3000) : `FAILED: ${deepseek.reason?.message || deepseek.reason}`;
   return `Route: both\n\n## Qwen\n${qwenText}\n\n## DeepSeek\n${deepSeekText}`;
 }
 
@@ -321,7 +382,7 @@ const tools = [
 ];
 
 const server = new Server(
-  { name: "ai-team-mcp-server", version: "0.2.0" },
+  { name: "ai-team-mcp-server", version: "0.3.0" },
   { capabilities: { tools: {} } },
 );
 

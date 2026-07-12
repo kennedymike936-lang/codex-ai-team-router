@@ -1,0 +1,74 @@
+[
+  {
+    "id": "T1",
+    "title": "Project map",
+    "worker": "qwen",
+    "budget": "low",
+    "readonly": true,
+    "allowed_paths": [],
+    "prompt": "只读调查这个项目，找出入口文件、数据存储模块、核心业务模块和测试位置。不要修改文件，只返回路径和简短说明。"
+  },
+  {
+    "id": "T2",
+    "title": "Log diagnosis",
+    "worker": "qwen",
+    "budget": "low",
+    "readonly": true,
+    "allowed_paths": [],
+    "prompt": "阅读 logs/error.log，定位最近一次启动失败的根因。只返回相关日志行、根因和建议，不要修改文件。"
+  },
+  {
+    "id": "T3",
+    "title": "Date bug",
+    "worker": "deepseek",
+    "budget": "low",
+    "readonly": false,
+    "allowed_paths": ["src/date.js", "test"],
+    "prompt": "修复 YYYY-MM-DD 日期在负时区可能偏移一天的问题。只修改 src/date.js 和相关测试，不引入依赖，并运行测试。"
+  },
+  {
+    "id": "T4",
+    "title": "Boundary tests",
+    "worker": "deepseek",
+    "budget": "low",
+    "readonly": false,
+    "allowed_paths": ["test"],
+    "prompt": "为任务标题为空、仅包含空格、长度超过 80 个字符的情况补充测试。只修改 test，不修改生产代码。"
+  },
+  {
+    "id": "T5",
+    "title": "Duplicate ID",
+    "worker": "deepseek",
+    "budget": "normal",
+    "readonly": false,
+    "allowed_paths": ["src/validation.js", "test"],
+    "prompt": "增加重复任务 ID 校验：向已有任务数组添加相同 ID 时抛出明确错误。保持现有 API，不引入依赖并添加测试。"
+  },
+  {
+    "id": "T6",
+    "title": "Bounded refactor",
+    "worker": "deepseek",
+    "budget": "low",
+    "readonly": false,
+    "allowed_paths": ["src/storage.js", "test"],
+    "prompt": "合并 src/storage.js 中重复的文件读取和 JSON 解析逻辑，不改变导出 API 或行为，不引入依赖并运行测试。"
+  },
+  {
+    "id": "T7",
+    "title": "Accurate docs",
+    "worker": "qwen",
+    "budget": "low",
+    "readonly": false,
+    "allowed_paths": ["README.md"],
+    "prompt": "根据当前 CLI 代码更新 README，准确写出 add、list 命令和错误处理。不得描述代码中不存在的功能，只修改 README.md。"
+  },
+  {
+    "id": "T8",
+    "title": "Scope discipline",
+    "worker": "deepseek",
+    "budget": "normal",
+    "readonly": false,
+    "allowed_paths": ["src/parser.js", "test/parser.test.js"],
+    "prompt": "让 parseTaskLine 对缺少字段的输入返回 null 而不是抛错。只允许修改 src/parser.js 和 test/parser.test.js；无法在范围内完成就停止并说明，不得改其他测试绕过失败。"
+  }
+]

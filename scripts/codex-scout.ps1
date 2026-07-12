@@ -10,6 +10,9 @@ param(
 
   [string]$MaxWallTime = "5m",
 
+  [ValidateSet("low", "normal", "deep")]
+  [string]$Budget = "low",
+
   [int]$SummaryLines = 30,
 
   [int]$SummaryMaxChars = 3000
@@ -61,6 +64,7 @@ if (-not (Test-Path -LiteralPath $workerScript)) {
   -Task $scoutTask `
   -Cwd $Cwd `
   -Approval auto `
+  -Budget $Budget `
   -MaxWallTime $MaxWallTime `
   -SummaryLines $SummaryLines `
   -SummaryMaxChars $SummaryMaxChars
