@@ -16,4 +16,6 @@
 
 建议先依次执行 `T1` 到 `T8`，每项只跑一次。代码任务完成后会运行隐藏验收和 Gate；完整 worker 产物与 Gate 报告保存在 `%USERPROFILE%\.codex-ai-team\benchmark`。
 
-MCP 精确 Token 账本保存在 `%USERPROFILE%\.codex-ai-team\usage\usage.jsonl`。Qwen Code / Claude Code CLI 当前不稳定提供统一的 Token 字段，因此 Worker 账本 `%USERPROFILE%\.codex-ai-team\usage\worker-runs.jsonl` 先记录模型、预算、耗时、成败和 DeepSeek 请求费用上限，不伪造实际 Token 或费用。
+MCP 精确 Token 账本保存在 `%USERPROFILE%\.codex-ai-team\usage\usage.jsonl`。使用 Qwen Code Agent 外壳的 Worker 会把精确 Token、缓存命中、回合数和价格估算写入 `%USERPROFILE%\.codex-ai-team\usage\worker-runs.jsonl`；旧版 Claude Code 兼容外壳无法稳定返回 Token 时保留空值，不伪造费用。
+
+当前实测结论见 [RESULTS-2026-07-12.md](RESULTS-2026-07-12.md)。

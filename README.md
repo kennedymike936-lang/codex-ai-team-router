@@ -369,11 +369,13 @@ MCP 请求会记录服务商返回的准确 Token 用量、模型、耗时、是
 %USERPROFILE%\.codex-ai-team\usage\usage.jsonl
 ```
 
-Qwen Code / Claude Code CLI 没有稳定统一的 Token 输出格式，因此 Worker 账本只记录可验证信息，不编造实际 Token：
+Qwen Code Agent 外壳使用结构化 JSON 输出，Worker 账本会记录服务商返回的输入、输出、缓存 Token、回合数和公开单价估算。旧版 Claude Code 兼容外壳仍不提供统一 Token 字段，因此该模式只记录可验证信息，不编造用量：
 
 ```text
 %USERPROFILE%\.codex-ai-team\usage\worker-runs.jsonl
 ```
+
+账本中的 `estimated_cost_cny` 只是按仓库价格目录计算的估值；缓存折扣、限时活动、地域和账户阶梯价以服务商账单为准。Worker 的完整结构化响应保存在每次运行目录的 `qwen-result.json`，Codex 默认只读取短摘要。
 
 DeepSeek Worker 默认使用 Qwen Code 的 OpenAI-compatible Agent 外壳，并在每次运行目录中生成不含密钥的临时 Provider 配置，声明 DeepSeek V4 的上下文能力；这避免 Claude Code 对第三方模型费用的错误估算。需要兼容旧流程时可显式传入 `-DeepSeekHarness claude`。
 
