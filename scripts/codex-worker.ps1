@@ -16,10 +16,15 @@ param(
 
   [string[]]$AllowedPath = @(),
 
+  [string]$AllowedPathJson = "",
+
   [ValidateSet("auto", "default", "yolo", "plan")]
   [string]$Approval = "auto",
 
   [string]$MaxWallTime = "8m",
+
+  [ValidateRange(2, 12)]
+  [int]$MaxSessionTurns = 8,
 
   [ValidateSet("low", "normal", "deep")]
   [string]$Budget = "low",
@@ -39,7 +44,9 @@ param(
 
   [int]$SummaryLines = 30,
 
-  [int]$SummaryMaxChars = 3000
+  [int]$SummaryMaxChars = 3000,
+
+  [switch]$JsonOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -61,14 +68,28 @@ function Get-EnvValue {
 }
 
 function Add-ToolPath {
+  if ((";$env:PATHEXT;") -notmatch ";\.EXE;") {
+    $env:PATHEXT = ".COM;.EXE;.BAT;.CMD;.CPL"
+  }
+  $portableGitDirs = @()
+  $portableGitRoot = Join-Path $env:LOCALAPPDATA "Programs\PortableGit"
+  if (Test-Path -LiteralPath $portableGitRoot) {
+    $portableGitDirs = @(Get-ChildItem -LiteralPath $portableGitRoot -Directory -ErrorAction SilentlyContinue |
+      Sort-Object Name -Descending |
+      ForEach-Object { Join-Path $_.FullName "cmd" })
+  }
   $extraDirs = @(
     $env:AI_TEAM_NODE_DIR,
     $env:AI_TEAM_GIT_DIR,
     $env:AI_TEAM_TOOLS_DIR,
+    (Join-Path $env:USERPROFILE ".cache\codex-runtimes\codex-primary-runtime\dependencies\native\git\cmd"),
+    (Join-Path $env:ProgramFiles "Git\cmd"),
     (Join-Path $env:APPDATA "npm")
-  ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) }
+  )
+  $extraDirs += @($portableGitDirs)
+  $extraDirs = @($extraDirs | Where-Object { $_ -and (Test-Path -LiteralPath $_) })
   if ($extraDirs.Count -gt 0) {
-    $env:Path = (($extraDirs + $env:Path) -join ";")
+    $env:Path = ((@($extraDirs) + @($env:Path)) -join ";")
   }
 }
 
@@ -213,12 +234,62 @@ function Get-EstimatedCostCny {
   return [math]::Round($cost, 8)
 }
 
+function Get-GitFileState {
+  param([string]$Root)
+
+  $state = @{}
+  $previousErrorAction = $ErrorActionPreference
+  Push-Location $Root
+  try {
+    $ErrorActionPreference = "SilentlyContinue"
+    git rev-parse --is-inside-work-tree *> $null
+    if ($LASTEXITCODE -ne 0) { return $null }
+    $paths = @(git ls-files --cached --others --exclude-standard | Where-Object { $_ })
+    foreach ($path in $paths) {
+      $absolutePath = Join-Path $Root $path
+      if (-not (Test-Path -LiteralPath $absolutePath -PathType Leaf)) {
+        $state[$path] = "<missing>"
+        continue
+      }
+      try {
+        $item = Get-Item -LiteralPath $absolutePath
+        if ($item.Length -gt 10MB) {
+          $state[$path] = "meta:$($item.Length):$($item.LastWriteTimeUtc.Ticks)"
+        } else {
+          $state[$path] = (Get-FileHash -LiteralPath $absolutePath -Algorithm SHA256).Hash
+        }
+      } catch {
+        $state[$path] = "<unreadable>"
+      }
+    }
+  } finally {
+    $ErrorActionPreference = $previousErrorAction
+    Pop-Location
+  }
+  return ,$state
+}
+
+function Compare-GitFileState {
+  param($Before, $After)
+  if ($null -eq $Before -or $null -eq $After) { return @() }
+  $keys = @($Before.Keys) + @($After.Keys) | Select-Object -Unique
+  return @($keys | Where-Object {
+    (-not $Before.ContainsKey($_)) -or
+    (-not $After.ContainsKey($_)) -or
+    $Before[$_] -ne $After[$_]
+  } | Sort-Object)
+}
+
 if (-not (Test-Path -LiteralPath $Cwd)) {
   throw "Cwd does not exist: $Cwd"
 }
 $Cwd = (Resolve-Path -LiteralPath $Cwd).Path
+if (-not [string]::IsNullOrWhiteSpace($AllowedPathJson)) {
+  $AllowedPath = @($AllowedPathJson | ConvertFrom-Json | ForEach-Object { [string]$_ })
+}
 
 Add-ToolPath
+$beforeWorkspaceState = Get-GitFileState -Root $Cwd
 $runDir = New-RunDir -Kind $Worker
 if ([string]::IsNullOrWhiteSpace($TaskId)) {
   $TaskId = "task-$(Get-Date -Format 'yyyyMMdd-HHmmss')-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
@@ -262,6 +333,7 @@ $meta += "Approval: $Approval"
 $meta += "Budget: $Budget"
 $meta += "DeepSeekHarness: $DeepSeekHarness"
 $meta += "MaxWallTime: $MaxWallTime"
+$meta += "MaxSessionTurns: $MaxSessionTurns"
 $meta += "AllowedPath: $($AllowedPath -join ', ')"
 $meta | Set-Content -LiteralPath $metaPath -Encoding UTF8
 
@@ -303,7 +375,7 @@ try {
       "--openai-base-url", $env:OPENAI_BASE_URL,
       "--approval-mode", $Approval,
       "--max-wall-time", $MaxWallTime,
-      "--max-session-turns", "8",
+      "--max-session-turns", ([string]$MaxSessionTurns),
       "--output-format", "json"
     )
     & qwen @qwenArgs 1> $structuredResultPath 2> $qwenErrorPath
@@ -380,7 +452,7 @@ try {
         "--model", $selectedModel,
         "--approval-mode", $Approval,
         "--max-wall-time", $MaxWallTime,
-        "--max-session-turns", "8",
+        "--max-session-turns", ([string]$MaxSessionTurns),
         "--output-format", "json"
       )
       & qwen @deepSeekArgs 1> $structuredResultPath 2> $qwenErrorPath
@@ -423,43 +495,62 @@ try {
   Pop-Location
 }
 
-Write-Host ""
-Write-Host "Worker finished."
-Write-Host "RunDir: $runDir"
-Write-Host "Result: $resultPath"
-Write-Host "Summary: $summaryPath"
-Write-Host "WorkerResult: $workerResultPath"
-Write-Host "Model: $selectedModel"
-if ($null -ne $workerExitCode) {
-  Write-Host "ExitCode: $workerExitCode"
+if (-not $JsonOnly) {
+  Write-Host ""
+  Write-Host "Worker finished."
+  Write-Host "RunDir: $runDir"
+  Write-Host "Result: $resultPath"
+  Write-Host "Summary: $summaryPath"
+  Write-Host "WorkerResult: $workerResultPath"
+  Write-Host "Model: $selectedModel"
+  if ($null -ne $workerExitCode) {
+    Write-Host "ExitCode: $workerExitCode"
+  }
+  Write-Host ""
+  Write-Host "---- compact summary ----"
 }
-Write-Host ""
-Write-Host "---- compact summary ----"
 if (Test-Path -LiteralPath $resultPath) {
   $summaryText = ((Get-Content -LiteralPath $resultPath -Tail $SummaryLines) -join [Environment]::NewLine).Trim()
   if ($summaryText.Length -gt $SummaryMaxChars) {
     $summaryText = "[truncated to final $SummaryMaxChars characters]" + [Environment]::NewLine + $summaryText.Substring($summaryText.Length - $SummaryMaxChars)
   }
   $summaryText | Set-Content -LiteralPath $summaryPath -Encoding UTF8
-  Write-Host $summaryText
+  if (-not $JsonOnly) { Write-Host $summaryText }
 } else {
   $summaryText = "Worker produced no result file."
   $summaryText | Set-Content -LiteralPath $summaryPath -Encoding UTF8
 }
 
 $changedFiles = @()
+$pushedForFallback = $false
 try {
+  $afterWorkspaceState = Get-GitFileState -Root $Cwd
+  if ($null -ne $beforeWorkspaceState -and $null -ne $afterWorkspaceState) {
+    $changedFiles = @(Compare-GitFileState -Before $beforeWorkspaceState -After $afterWorkspaceState)
+  } else {
   Push-Location $Cwd
+  $pushedForFallback = $true
+  $previousErrorAction = $ErrorActionPreference
+  $ErrorActionPreference = "SilentlyContinue"
   git rev-parse --is-inside-work-tree *> $null
-  if ($LASTEXITCODE -eq 0) {
-    $changedFiles = @(git diff HEAD --name-only)
+  $insideGitExit = $LASTEXITCODE
+  if ($insideGitExit -eq 0) {
+    git rev-parse --verify HEAD *> $null
+    $headExit = $LASTEXITCODE
+    if ($headExit -eq 0) {
+      $changedFiles = @(git diff HEAD --name-only)
+    } else {
+      $changedFiles = @(git ls-files --cached)
+    }
     $changedFiles += @(git ls-files --others --exclude-standard)
     $changedFiles = @($changedFiles | Where-Object { $_ } | Select-Object -Unique)
+  }
   }
 } catch {
   $changedFiles = @()
 } finally {
-  Pop-Location
+  if ($null -ne $previousErrorAction) { $ErrorActionPreference = $previousErrorAction }
+  if ($pushedForFallback) { Pop-Location }
 }
 
 $workerStatus = $(if ($workerExitCode -eq 0) { "success" } else { "failed" })
@@ -521,3 +612,8 @@ $ledgerEvent = [ordered]@{
   worker_result = $workerResultPath
 }
 Add-Content -LiteralPath $UsageLedger -Value ($ledgerEvent | ConvertTo-Json -Compress) -Encoding UTF8
+
+if ($JsonOnly) {
+  Get-Content -LiteralPath $workerResultPath -Raw -Encoding UTF8 |
+    ConvertFrom-Json | ConvertTo-Json -Compress -Depth 5
+}

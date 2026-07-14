@@ -10,12 +10,17 @@ param(
 
   [string]$MaxWallTime = "5m",
 
+  [ValidateRange(2, 8)]
+  [int]$MaxSessionTurns = 4,
+
   [ValidateSet("low", "normal", "deep")]
   [string]$Budget = "low",
 
   [int]$SummaryLines = 30,
 
-  [int]$SummaryMaxChars = 3000
+  [int]$SummaryMaxChars = 3000,
+
+  [switch]$JsonOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -59,12 +64,17 @@ if (-not (Test-Path -LiteralPath $workerScript)) {
   throw "Worker script not found: $workerScript"
 }
 
-& $workerScript `
-  -Worker $Worker `
-  -Task $scoutTask `
-  -Cwd $Cwd `
-  -Approval auto `
-  -Budget $Budget `
-  -MaxWallTime $MaxWallTime `
-  -SummaryLines $SummaryLines `
-  -SummaryMaxChars $SummaryMaxChars
+$workerArgs = @{
+  Worker = $Worker
+  Task = $scoutTask
+  Cwd = $Cwd
+  Approval = "auto"
+  Budget = $Budget
+  MaxWallTime = $MaxWallTime
+  MaxSessionTurns = $MaxSessionTurns
+  SummaryLines = $SummaryLines
+  SummaryMaxChars = $SummaryMaxChars
+}
+if ($JsonOnly) { $workerArgs.JsonOnly = $true }
+
+& $workerScript @workerArgs

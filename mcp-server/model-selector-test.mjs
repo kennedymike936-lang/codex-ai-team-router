@@ -45,4 +45,20 @@ try {
   await rm(dir, { recursive: true, force: true });
 }
 
-console.log("Model selector and ledger: 12 scenarios passed");
+{
+  const event = usageEvent({
+    provider: "xai",
+    model: "grok-4.20-0309-non-reasoning",
+    budget: "low",
+    usage: { input_tokens: 100, output_tokens: 20 },
+    latencyMs: 12,
+    actualCostUsdTicks: 87840500,
+    serverSideToolsUsed: 1,
+    citations: ["https://x.com/xai/status/1"],
+  });
+  assert.equal(event.actual_cost_usd, 0.00878405);
+  assert.equal(event.server_side_tools_used, 1);
+  assert.deepEqual(event.citations, ["https://x.com/xai/status/1"]);
+}
+
+console.log("Model selector and ledger: 13 scenarios passed");

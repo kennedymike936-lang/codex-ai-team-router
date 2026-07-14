@@ -11,7 +11,7 @@ const transport = new StdioClientTransport({
 await client.connect(transport);
 const listed = await client.listTools();
 const names = listed.tools.map((tool) => tool.name).sort();
-const expected = ["delegate_task", "worker_gate_review"];
+const expected = ["delegate_task", "grok_search", "project_task", "worker_gate_review"];
 
 for (const name of expected) {
   if (!names.includes(name)) throw new Error(`Missing MCP tool: ${name}`);
@@ -24,6 +24,33 @@ const preview = await client.callTool({
 const previewText = preview.content?.[0]?.text || "";
 if (!previewText.includes("deepseek")) {
   throw new Error(`Unexpected dry-run route: ${previewText}`);
+}
+
+const grokPreview = await client.callTool({
+  name: "delegate_task",
+  arguments: { task: "Find the latest posts on X about xAI", dry_run: true },
+});
+const grokPreviewText = grokPreview.content?.[0]?.text || "";
+if (!grokPreviewText.includes("grok")) {
+  throw new Error(`Unexpected Grok dry-run route: ${grokPreviewText}`);
+}
+
+const searchPreview = await client.callTool({
+  name: "grok_search",
+  arguments: { query: "latest package price", source: "auto", dry_run: true },
+});
+const searchPreviewText = searchPreview.content?.[0]?.text || "";
+if (!searchPreviewText.includes("(web)") || !searchPreviewText.includes("one server-side tool turn")) {
+  throw new Error(`Unexpected search dry-run: ${searchPreviewText}`);
+}
+
+const projectPreview = await client.callTool({
+  name: "project_task",
+  arguments: { task: "Fix a bounded TypeScript bug", cwd: process.cwd(), dry_run: true },
+});
+const projectPreviewJson = JSON.parse(projectPreview.content?.[0]?.text || "{}");
+if (projectPreviewJson.mode !== "implement" || projectPreviewJson.worker !== "deepseek" || projectPreviewJson.run_gate !== true) {
+  throw new Error(`Unexpected project dry-run: ${JSON.stringify(projectPreviewJson)}`);
 }
 
 const quality = await client.callTool({
@@ -49,5 +76,7 @@ if (handoff.decision !== "retry" || handoff.score !== 85) {
 
 console.log(`MCP tools: ${names.join(", ")}`);
 console.log(`Dry run: ${previewText}`);
+console.log(`Grok dry run: ${grokPreviewText}`);
+console.log(`Project dry run: ${projectPreviewJson.worker} -> gate ${projectPreviewJson.run_gate}`);
 console.log(`Quality gate: ${handoff.score} -> ${handoff.decision}`);
 await client.close();

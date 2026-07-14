@@ -7,5 +7,6 @@ startup_timeout_sec = 60
 [mcp_servers.ai_team_mcp.env]
 QWEN_MCP_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
 DEEPSEEK_MCP_BASE_URL = 'https://api.deepseek.com/anthropic'
+XAI_MCP_BASE_URL = 'https://api.x.ai/v1'
 # AI_TEAM_MODEL_MODE defaults to 'auto'. Set it to 'fixed' only when you
-# intentionally want QWEN_MCP_MODEL / DEEPSEEK_MCP_MODEL to stay pinned.
+# intentionally want QWEN_MCP_MODEL / DEEPSEEK_MCP_MODEL / XAI_SEARCH_MODEL pinned.

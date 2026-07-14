@@ -1,0 +1,422 @@
+import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { access, readdir, stat } from "node:fs/promises";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+import { planTaskTeam } from "./team-planner.mjs";
+
+const execFileAsync = promisify(execFile);
+const serverDir = dirname(fileURLToPath(import.meta.url));
+
+const INSPECTION_WORDS = /\b(inspect|audit|investigate|find|locate|map|read logs?|analy[sz]e|triage|review existing)\b|检查|分析|查找|定位|日志|盘点|侦查|审计|项目地图/i;
+const DOCUMENT_WORDS = /\b(docs?|readme|summary|summarize|organize|translate)\b|文档|总结|整理|翻译|润色/i;
+const CODE_WORDS = /\b(code|bug|fix|implement|refactor|test|build|lint|typecheck|typescript|javascript|python|powershell|css|react|api)\b|代码|脚本|修复|实现|测试|构建|重构|页面|接口/i;
+
+function compact(value, maxChars = 2600) {
+  const text = String(value || "").trim();
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}\n[truncated; use the artifact path for full output]`;
+}
+
+function parseJsonOutput(stdout, label) {
+  const text = String(stdout || "").replace(/^\uFEFF/, "").trim();
+  try {
+    return JSON.parse(text);
+  } catch {
+    const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      try {
+        return JSON.parse(lines[index]);
+      } catch {}
+    }
+  }
+  throw new Error(`${label} did not return valid JSON: ${compact(text, 1200)}`);
+}
+
+function normalizeAllowedPaths(values = []) {
+  if (!Array.isArray(values)) return [];
+  return [...new Set(values.map((value) => String(value).trim()).filter(Boolean))].map((value) => {
+    const normalized = value.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/$/, "");
+    if (!normalized || normalized === ".") return ".";
+    if (isAbsolute(value) || normalized === ".." || normalized.startsWith("../") || normalized.includes("/../")) {
+      throw new Error(`allowed_paths must stay inside cwd: ${value}`);
+    }
+    return normalized;
+  });
+}
+
+async function resolveScript(name) {
+  const configuredRoot = process.env.AI_TEAM_SCRIPT_ROOT;
+  const candidates = [
+    configuredRoot ? resolve(configuredRoot, name) : "",
+    resolve(serverDir, "..", "scripts", name),
+    resolve(serverDir, "..", name),
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    try {
+      await access(candidate);
+      return candidate;
+    } catch {}
+  }
+  throw new Error(`AI Team script not found: ${name}`);
+}
+
+async function runPowerShell(script, scriptArgs, timeoutMs) {
+  try {
+    return await execFileAsync(
+      "powershell.exe",
+      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, ...scriptArgs],
+      { encoding: "utf8", windowsHide: true, timeout: timeoutMs, maxBuffer: 1024 * 1024 },
+    );
+  } catch (error) {
+    const details = compact([error?.message, error?.stdout, error?.stderr].filter(Boolean).join("\n"), 1800);
+    throw new Error(`Local project worker failed: ${details}`);
+  }
+}
+
+async function resolveGitCommand() {
+  const candidates = [
+    process.env.AI_TEAM_GIT_DIR ? join(process.env.AI_TEAM_GIT_DIR, "git.exe") : "",
+    process.env.USERPROFILE ? join(process.env.USERPROFILE, ".cache", "codex-runtimes", "codex-primary-runtime", "dependencies", "native", "git", "cmd", "git.exe") : "",
+    process.env.ProgramFiles ? join(process.env.ProgramFiles, "Git", "cmd", "git.exe") : "",
+    process.env["ProgramFiles(x86)"] ? join(process.env["ProgramFiles(x86)"], "Git", "cmd", "git.exe") : "",
+  ].filter(Boolean);
+  const portableRoot = process.env.LOCALAPPDATA
+    ? join(process.env.LOCALAPPDATA, "Programs", "PortableGit")
+    : "";
+  if (portableRoot) {
+    const entries = await readdir(portableRoot, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries.filter((item) => item.isDirectory()).sort((a, b) => b.name.localeCompare(a.name))) {
+      candidates.unshift(join(portableRoot, entry.name, "cmd", "git.exe"));
+    }
+  }
+  for (const candidate of candidates) {
+    try {
+      await access(candidate);
+      return candidate;
+    } catch {}
+  }
+  return "git";
+}
+
+export async function ensureGitBaseline(cwd, mode) {
+  if (mode !== "implement") return { status: "not_needed", initialized: false };
+  const gitCommand = await resolveGitCommand();
+  try {
+    await execFileAsync(gitCommand, ["rev-parse", "--is-inside-work-tree"], {
+      cwd,
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 5000,
+    });
+    return { status: "existing", initialized: false };
+  } catch {}
+
+  try {
+    await execFileAsync(gitCommand, ["init", "-q"], {
+      cwd,
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 10000,
+    });
+    return { status: "initialized", initialized: true };
+  } catch (error) {
+    return { status: "unavailable", initialized: false, error: compact(error?.message, 300) };
+  }
+}
+
+async function runScout({ task, cwd, worker, budget, maxWallTime, timeoutMs, maxTurns = 4, summaryMaxChars = 2400 }) {
+  const scoutScript = await resolveScript("codex-scout.ps1");
+  const execution = await runPowerShell(scoutScript, [
+    "-Task", String(task),
+    "-Cwd", cwd,
+    "-Worker", worker,
+    "-Budget", budget,
+    "-MaxWallTime", maxWallTime,
+    "-MaxSessionTurns", String(maxTurns),
+    "-SummaryMaxChars", String(summaryMaxChars),
+    "-JsonOnly",
+  ], timeoutMs);
+  return parseJsonOutput(execution.stdout, `${worker} scout worker`);
+}
+
+function combineInspectionResults(results) {
+  const successful = results.filter((result) => result?.status === "success");
+  const usable = successful.length > 0 ? successful : results.filter(Boolean);
+  const usage = usable.reduce((sum, result) => {
+    for (const key of ["input_tokens", "output_tokens", "cache_read_tokens", "total_tokens", "num_turns"]) {
+      sum[key] += Number(result?.usage?.[key] || 0);
+    }
+    return sum;
+  }, { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, total_tokens: 0, num_turns: 0 });
+  return {
+    status: successful.length > 0 ? "success" : "failed",
+    model: usable.map((result) => result.model).filter(Boolean).join(", "),
+    summary: usable.map((result, index) => `## Scout ${index + 1}\n${result.summary || "No summary."}`).join("\n\n"),
+    usage,
+    changed_files: [],
+    artifacts: usable[0]?.artifacts || {},
+    team_runs: usable.map((result) => result.artifacts?.run_dir).filter(Boolean),
+  };
+}
+
+function combineUsage(results = []) {
+  const keys = ["input_tokens", "output_tokens", "cache_read_tokens", "total_tokens", "num_turns"];
+  const usage = results.reduce((sum, result) => {
+    for (const key of keys) sum[key] += Number(result?.usage?.[key] || 0);
+    return sum;
+  }, Object.fromEntries(keys.map((key) => [key, 0])));
+  return Object.values(usage).some((value) => value > 0) ? usage : null;
+}
+
+export function buildTargetedRetryTask(gate = {}, workerResult = {}) {
+  const failedChecks = Object.entries(gate.checks || {})
+    .filter(([, status]) => status === "fail")
+    .map(([name]) => name);
+  return [
+    "Targeted retry: this is attempt 2 of 2. Continue from the current workspace state.",
+    "Fix only the incomplete outcome or failed checks. Preserve working code, keep the diff bounded, and do not broaden scope.",
+    gate.reason ? `Gate reason: ${gate.reason}` : "",
+    gate.requirement_status ? `Requirement status: ${gate.requirement_status}` : "",
+    failedChecks.length > 0 ? `Failed checks: ${failedChecks.join(", ")}` : "",
+    gate.retry?.instruction ? `Gate instruction: ${gate.retry.instruction}` : "",
+    workerResult.summary ? `Previous attempt summary:\n${compact(workerResult.summary, 900)}` : "",
+  ].filter(Boolean).join("\n");
+}
+
+export function shouldRunTargetedRetry(gate, attempt, finalAttempt = 2) {
+  return gate?.decision === "retry" && attempt < finalAttempt;
+}
+
+export function selectProjectMode(task = "", requested = "auto") {
+  if (["inspect", "implement"].includes(requested)) return requested;
+  return INSPECTION_WORDS.test(String(task)) ? "inspect" : "implement";
+}
+
+export function selectProjectWorker(task = "", mode = "implement", preferred = "auto") {
+  if (["qwen", "deepseek"].includes(preferred)) return preferred;
+  if (mode === "inspect") return "qwen";
+  const text = String(task);
+  if (DOCUMENT_WORDS.test(text) && !CODE_WORDS.test(text)) return "qwen";
+  return "deepseek";
+}
+
+export function previewProjectTask(args = {}) {
+  const mode = selectProjectMode(args.task, args.mode);
+  const worker = selectProjectWorker(args.task, mode, args.preferred);
+  const team = planTaskTeam({
+    task: args.task,
+    context: args.context,
+    allowedPaths: args.allowed_paths,
+    maxAssistants: args.max_assistants,
+  });
+  const planner = worker === "qwen" ? "deepseek" : "qwen";
+  return {
+    dry_run: true,
+    mode,
+    worker,
+    planner: team.use_planner ? planner : null,
+    complexity: team.complexity,
+    team: {
+      assistant_count: team.assistant_count,
+      coding_assistants: team.coding_assistants,
+      use_grok: team.use_grok,
+      max_assistants: team.max_assistants,
+    },
+    budget: args.budget || "low",
+    approval: mode === "inspect" ? "auto" : "yolo",
+    run_gate: mode === "implement" && args.run_gate !== false,
+    max_minutes: Number(args.max_minutes) || (mode === "inspect" ? 5 : 8),
+  };
+}
+
+export function requirementStatusForWorker(workerResult = {}, mode = "implement") {
+  const changedFiles = Array.isArray(workerResult.changed_files) ? workerResult.changed_files : [];
+  if (mode !== "implement") return workerResult.status === "success" ? "pass" : "unknown";
+  const summary = String(workerResult.summary || "");
+  if (workerResult.status !== "success") return changedFiles.length > 0 ? "partial" : "fail";
+  if (changedFiles.length > 0) return "pass";
+  if (/\b(blocked|cannot|unable|denied|permission)\b|无法|不能|拒绝|权限/i.test(summary)) return "fail";
+  return "unknown";
+}
+
+export async function runProjectTask(args = {}) {
+  if (!String(args.task || "").trim()) throw new Error("project_task requires task.");
+  if (!String(args.cwd || "").trim()) throw new Error("project_task requires cwd.");
+
+  const cwd = resolve(String(args.cwd));
+  const cwdStat = await stat(cwd).catch(() => null);
+  if (!cwdStat?.isDirectory()) throw new Error(`cwd is not a directory: ${cwd}`);
+
+  const preview = previewProjectTask(args);
+  const allowedPaths = normalizeAllowedPaths(args.allowed_paths || []);
+  if (args.dry_run === true) return { ...preview, cwd, allowed_paths: allowedPaths };
+
+  const taskId = String(args.task_id || `project-${Date.now()}-${randomUUID().slice(0, 8)}`);
+  const maxMinutes = Math.max(1, Math.min(15, preview.max_minutes));
+  const maxWallTime = `${maxMinutes}m`;
+  const timeoutMs = (maxMinutes + 4) * 60 * 1000;
+  const allowedJson = JSON.stringify(allowedPaths);
+  const gitBaseline = await ensureGitBaseline(cwd, preview.mode);
+  let plannerResult = null;
+  let workerResult;
+  let gate = null;
+  const workerResults = [];
+  const attempts = [];
+  const changedFileSet = new Set();
+
+  if (preview.mode === "inspect") {
+    const workers = preview.team.coding_assistants >= 2
+      ? [preview.worker, preview.planner]
+      : [preview.worker];
+    const settled = await Promise.allSettled(workers.map((worker) => runScout({
+      task: args.task,
+      cwd,
+      worker,
+      budget: preview.budget,
+      maxWallTime,
+      timeoutMs,
+    })));
+    const results = settled.map((entry) => entry.status === "fulfilled"
+      ? entry.value
+      : { status: "failed", summary: compact(entry.reason?.message || entry.reason), changed_files: [] });
+    workerResult = results.length === 1 ? results[0] : combineInspectionResults(results);
+  } else {
+    if (preview.team.coding_assistants >= 2) {
+      try {
+        plannerResult = await runScout({
+          task: [
+            "Prepare a concise implementation plan for another coding worker.",
+            "Inspect only the files needed for this task. Identify exact files, risks, and validation commands.",
+            "Do not edit files.",
+            String(args.task),
+          ].join("\n\n"),
+          cwd,
+          worker: preview.planner,
+          budget: "low",
+          maxWallTime: `${Math.min(maxMinutes, 5)}m`,
+          timeoutMs,
+          maxTurns: 2,
+          summaryMaxChars: 1600,
+        });
+      } catch (error) {
+        plannerResult = { status: "failed", summary: `Planner unavailable: ${compact(error?.message || error, 500)}` };
+      }
+    }
+
+    const baseWorkerTask = [
+      String(args.task),
+      plannerResult?.summary ? `Planning scout notes (verify before acting):\n${compact(plannerResult.summary, 1600)}` : "",
+      args.research_context ? `Current external research (read-only; verify relevance):\n${compact(args.research_context, 1800)}` : "",
+    ].filter(Boolean).join("\n\n");
+    const workerScript = await resolveScript("codex-worker.ps1");
+    const gateScript = preview.run_gate ? await resolveScript("codex-gate.ps1") : null;
+    const initialAttempt = Number(args.attempt) === 2 ? 2 : 1;
+    const finalAttempt = preview.run_gate ? 2 : initialAttempt;
+    let retryTask = "";
+
+    for (let attempt = initialAttempt; attempt <= finalAttempt; attempt += 1) {
+      const workerTask = [baseWorkerTask, retryTask].filter(Boolean).join("\n\n");
+      const workerArgs = [
+        "-Worker", preview.worker,
+        "-Task", workerTask,
+        "-Cwd", cwd,
+        "-TaskId", taskId,
+        "-Attempt", String(attempt),
+        "-Approval", preview.approval,
+        "-Budget", preview.budget,
+        "-MaxWallTime", maxWallTime,
+        "-MaxSessionTurns", "8",
+        "-SummaryMaxChars", "2600",
+        "-AllowedPathJson", allowedJson,
+        "-JsonOnly",
+      ];
+      const workerExecution = await runPowerShell(workerScript, workerArgs, timeoutMs);
+      workerResult = parseJsonOutput(workerExecution.stdout, "Project worker");
+      workerResults.push(workerResult);
+      for (const file of workerResult.changed_files || []) changedFileSet.add(String(file));
+
+      if (gateScript) {
+        const gateArgs = [
+          "-Cwd", cwd,
+          "-TaskId", taskId,
+          "-Task", String(args.task),
+          "-Attempt", String(attempt),
+          "-RequirementStatus", requirementStatusForWorker(workerResult, preview.mode),
+          "-AllowedPathJson", allowedJson,
+          "-ChangedPathJson", JSON.stringify([...changedFileSet]),
+          "-WorkerRunDir", String(workerResult.artifacts?.run_dir || ""),
+          "-JsonOnly",
+        ];
+        const gateExecution = await runPowerShell(gateScript, gateArgs, timeoutMs);
+        gate = parseJsonOutput(gateExecution.stdout, "Project gate");
+      }
+
+      attempts.push({
+        attempt,
+        worker_status: workerResult.status,
+        changed_files: workerResult.changed_files || [],
+        worker_run: workerResult.artifacts?.run_dir || null,
+        gate_decision: gate?.decision || null,
+        gate_score: gate?.score ?? null,
+      });
+      if (!shouldRunTargetedRetry(gate, attempt, finalAttempt)) break;
+      retryTask = buildTargetedRetryTask(gate, workerResult);
+    }
+  }
+
+  const combinedChangedFiles = preview.mode === "implement"
+    ? [...changedFileSet]
+    : (workerResult.changed_files || []);
+  const combinedWorkerRuns = preview.mode === "implement"
+    ? workerResults.map((result) => result.artifacts?.run_dir).filter(Boolean)
+    : (workerResult.team_runs || []);
+  const combinedModels = [...new Set(workerResults.map((result) => result.model).filter(Boolean))].join(", ");
+  const finalSummary = attempts.length > 1
+    ? `Completed ${attempts.length} worker attempts. Final attempt:\n${workerResult.summary || "No summary."}`
+    : workerResult.summary;
+
+  return {
+    schema_version: "1.0",
+    task_id: taskId,
+    mode: preview.mode,
+    route: preview.worker,
+    planner: preview.planner,
+    complexity: preview.complexity,
+    team: {
+      ...preview.team,
+      actual_assistant_count: preview.mode === "inspect"
+        ? Math.max(1, workerResult.team_runs?.length || 0) + (args.research_context ? 1 : 0)
+        : 1 + (plannerResult?.status === "success" ? 1 : 0) + (args.research_context ? 1 : 0),
+    },
+    budget: preview.budget,
+    git_baseline: gitBaseline,
+    status: gate?.decision || workerResult.status,
+    worker_status: workerResult.status,
+    model: combinedModels || workerResult.model,
+    summary: compact(finalSummary),
+    usage: preview.mode === "implement" ? combineUsage(workerResults) : (workerResult.usage || null),
+    changed_files: combinedChangedFiles,
+    attempts,
+    gate: gate ? {
+      decision: gate.decision,
+      score: gate.score,
+      reason: gate.reason,
+      hard_failures: gate.hard_failures || [],
+      checks: gate.checks || {},
+      metrics: gate.metrics || {},
+      retry: gate.retry || {},
+      codex_takeover: gate.codex_takeover || {},
+    } : null,
+    artifacts: {
+      worker_run: workerResult.artifacts?.run_dir || null,
+      worker_result: workerResult.artifacts?.worker_result || null,
+      full_result: workerResult.artifacts?.full_result || null,
+      planner_run: plannerResult?.artifacts?.run_dir || null,
+      team_runs: combinedWorkerRuns,
+      gate_report: gate?.artifacts?.gate_report || null,
+      handoff: gate?.artifacts?.handoff || null,
+    },
+  };
+}

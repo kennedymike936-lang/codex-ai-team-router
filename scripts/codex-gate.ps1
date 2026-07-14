@@ -8,6 +8,8 @@ param(
   [ValidateSet("pass", "partial", "unknown", "fail")]
   [string]$RequirementStatus = "pass",
   [string[]]$AllowedPath = @(),
+  [string]$AllowedPathJson = "",
+  [string]$ChangedPathJson = "",
   [string]$WorkerRunDir = "",
   [int]$MaxDiffLines = 800,
   [int]$MaxChangedFiles = 25,
@@ -23,14 +25,28 @@ try {
 } catch {}
 
 function Add-ToolPath {
+  if ((";$env:PATHEXT;") -notmatch ";\.EXE;") {
+    $env:PATHEXT = ".COM;.EXE;.BAT;.CMD;.CPL"
+  }
+  $portableGitDirs = @()
+  $portableGitRoot = Join-Path $env:LOCALAPPDATA "Programs\PortableGit"
+  if (Test-Path -LiteralPath $portableGitRoot) {
+    $portableGitDirs = @(Get-ChildItem -LiteralPath $portableGitRoot -Directory -ErrorAction SilentlyContinue |
+      Sort-Object Name -Descending |
+      ForEach-Object { Join-Path $_.FullName "cmd" })
+  }
   $extraDirs = @(
     $env:AI_TEAM_NODE_DIR,
     $env:AI_TEAM_GIT_DIR,
     $env:AI_TEAM_TOOLS_DIR,
+    (Join-Path $env:USERPROFILE ".cache\codex-runtimes\codex-primary-runtime\dependencies\native\git\cmd"),
+    (Join-Path $env:ProgramFiles "Git\cmd"),
     (Join-Path $env:APPDATA "npm")
-  ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) }
+  )
+  $extraDirs += @($portableGitDirs)
+  $extraDirs = @($extraDirs | Where-Object { $_ -and (Test-Path -LiteralPath $_) })
   if ($extraDirs.Count -gt 0) {
-    $env:Path = (($extraDirs + $env:Path) -join ";")
+    $env:Path = ((@($extraDirs) + @($env:Path)) -join ";")
   }
 }
 
@@ -115,10 +131,105 @@ function Test-PathAllowed {
   return $false
 }
 
+function Invoke-HtmlSmoke {
+  param([string[]]$Files, [string]$Root)
+
+  $htmlFiles = @($Files | Where-Object { $_ -match "(?i)\.html?$" })
+  if ($htmlFiles.Count -eq 0) { return $null }
+
+  $node = Get-Command node -ErrorAction SilentlyContinue
+  if ($null -eq $node) {
+    return [pscustomobject]@{
+      Name = "html smoke"
+      Command = "node --check <inline scripts>"
+      Status = "fail"
+      ExitCode = 1
+      Output = "Node.js is required to validate changed HTML files."
+    }
+  }
+
+  $issues = @()
+  foreach ($file in $htmlFiles) {
+    $absoluteFile = Join-Path $Root $file
+    if (-not (Test-Path -LiteralPath $absoluteFile -PathType Leaf)) { continue }
+    try {
+      $content = [System.IO.File]::ReadAllText($absoluteFile)
+    } catch {
+      $issues += "$file`: could not read file"
+      continue
+    }
+    if ([string]::IsNullOrWhiteSpace($content)) {
+      $issues += "$file`: file is empty"
+      continue
+    }
+
+    $openScripts = [regex]::Matches($content, "(?is)<script\b[^>]*>").Count
+    $closeScripts = [regex]::Matches($content, "(?is)</script\s*>").Count
+    if ($openScripts -ne $closeScripts) {
+      $issues += "$file`: unbalanced script tags ($openScripts opening, $closeScripts closing)"
+      continue
+    }
+    $openCanvas = [regex]::Matches($content, "(?is)<canvas\b[^>]*>").Count
+    $closeCanvas = [regex]::Matches($content, "(?is)</canvas\s*>").Count
+    if ($openCanvas -ne $closeCanvas) {
+      $issues += "$file`: unbalanced canvas tags ($openCanvas opening, $closeCanvas closing)"
+    }
+
+    $scripts = [regex]::Matches($content, "(?is)<script\b(?<attrs>[^>]*)>(?<body>.*?)</script\s*>")
+    $scriptNumber = 0
+    foreach ($script in $scripts) {
+      $scriptNumber += 1
+      $attrs = [string]$script.Groups["attrs"].Value
+      $body = [string]$script.Groups["body"].Value
+      if ($attrs -match "(?i)\bsrc\s*=" -or [string]::IsNullOrWhiteSpace($body)) { continue }
+
+      $typeMatch = [regex]::Match($attrs, '(?i)\btype\s*=\s*["''](?<type>[^"'']+)["'']')
+      $scriptType = $(if ($typeMatch.Success) { $typeMatch.Groups["type"].Value.ToLowerInvariant() } else { "text/javascript" })
+      if ($scriptType -notmatch "javascript|ecmascript|module") { continue }
+
+      $extension = $(if ($scriptType -eq "module") { ".mjs" } else { ".js" })
+      $tempPath = Join-Path ([System.IO.Path]::GetTempPath()) "ai-team-html-$([guid]::NewGuid().ToString('N'))$extension"
+      try {
+        [System.IO.File]::WriteAllText($tempPath, $body, (New-Object System.Text.UTF8Encoding($false)))
+        $previousErrorAction = $ErrorActionPreference
+        try {
+          $ErrorActionPreference = "Continue"
+          $syntaxOutput = & $node.Source --check $tempPath 2>&1 | Out-String
+          $syntaxExitCode = $LASTEXITCODE
+        } finally {
+          $ErrorActionPreference = $previousErrorAction
+        }
+        if ($syntaxExitCode -ne 0) {
+          $cleanOutput = $syntaxOutput.Replace($tempPath, $file).Trim()
+          $issues += "$file script $scriptNumber`: $cleanOutput"
+        }
+      } finally {
+        Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+      }
+    }
+  }
+
+  return [pscustomobject]@{
+    Name = "html smoke"
+    Command = "node --check <inline scripts>"
+    Status = $(if ($issues.Count -eq 0) { "pass" } else { "fail" })
+    ExitCode = $(if ($issues.Count -eq 0) { 0 } else { 1 })
+    Output = ($issues -join "`n")
+  }
+}
+
 if (-not (Test-Path -LiteralPath $Cwd)) {
   throw "Cwd does not exist: $Cwd"
 }
 $Cwd = (Resolve-Path -LiteralPath $Cwd).Path
+if (-not [string]::IsNullOrWhiteSpace($AllowedPathJson)) {
+  $AllowedPath = @($AllowedPathJson | ConvertFrom-Json | ForEach-Object { [string]$_ })
+}
+$hasExplicitChangeSet = -not [string]::IsNullOrWhiteSpace($ChangedPathJson)
+$explicitChangedFiles = @()
+if ($hasExplicitChangeSet) {
+  $explicitChangedFiles = @($ChangedPathJson | ConvertFrom-Json | ForEach-Object { [string]$_ } | Where-Object { $_ })
+}
 
 Add-ToolPath
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
@@ -133,13 +244,30 @@ if ([string]::IsNullOrWhiteSpace($TaskId)) {
 Push-Location $Cwd
 try {
   $isGit = $false
+  $hasHead = $false
+  $gitBaseline = "none"
+  $previousErrorAction = $ErrorActionPreference
   try {
+    $ErrorActionPreference = "SilentlyContinue"
     git rev-parse --is-inside-work-tree *> $null
-    if ($LASTEXITCODE -eq 0) {
+    $insideGitExit = $LASTEXITCODE
+    if ($insideGitExit -eq 0) {
+      $isGit = $true
       git rev-parse --verify HEAD *> $null
-      if ($LASTEXITCODE -eq 0) { $isGit = $true }
+      $headExit = $LASTEXITCODE
+      if ($headExit -eq 0) {
+        $hasHead = $true
+        $gitBaseline = "head"
+      } else {
+        $gitBaseline = "unborn"
+      }
     }
-  } catch {}
+  } finally {
+    $ErrorActionPreference = $previousErrorAction
+  }
+
+  $effectiveMaxDiffLines = $(if ($gitBaseline -eq "unborn") { [math]::Max($MaxDiffLines, 4000) } else { $MaxDiffLines })
+  $effectiveMaxChangedFiles = $(if ($gitBaseline -eq "unborn") { [math]::Max($MaxChangedFiles, 80) } else { $MaxChangedFiles })
 
   $changedFiles = @()
   $diffLines = 0
@@ -147,6 +275,24 @@ try {
   $forbiddenFiles = @()
   $secretHits = @()
   $scopeViolations = @()
+  $workerChangedFiles = @()
+  $hasWorkerChangeSet = $false
+
+  if ($hasExplicitChangeSet) {
+    $workerChangedFiles = @($explicitChangedFiles)
+    $hasWorkerChangeSet = $true
+  } elseif (-not [string]::IsNullOrWhiteSpace($WorkerRunDir)) {
+    $workerResultFile = Join-Path $WorkerRunDir "worker-result.json"
+    if (Test-Path -LiteralPath $workerResultFile) {
+      try {
+        $workerResultData = Get-Content -LiteralPath $workerResultFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($null -ne $workerResultData.changed_files) {
+          $workerChangedFiles = @($workerResultData.changed_files | ForEach-Object { [string]$_ } | Where-Object { $_ })
+          $hasWorkerChangeSet = $true
+        }
+      } catch {}
+    }
+  }
 
   $forbiddenPatterns = @(
     ".env",
@@ -171,11 +317,34 @@ try {
   )
 
   if ($isGit) {
-    $changedFiles = @(git diff HEAD --name-only)
-    $untrackedFiles = @(git ls-files --others --exclude-standard)
-    $changedFiles = @($changedFiles + $untrackedFiles | Where-Object { $_ } | Select-Object -Unique)
+    if ($hasHead) {
+      $trackedChangedFiles = @(git diff HEAD --name-only)
+    } else {
+      $trackedChangedFiles = @(git ls-files --cached)
+    }
+    $allUntrackedFiles = @(git ls-files --others --exclude-standard)
 
-    $numstat = @(git diff HEAD --numstat)
+    if ($hasWorkerChangeSet) {
+      $changedFiles = @($workerChangedFiles | Select-Object -Unique)
+      $untrackedFiles = @($allUntrackedFiles | Where-Object { $changedFiles -contains $_ })
+    } else {
+      $changedFiles = @($trackedChangedFiles + $allUntrackedFiles | Where-Object { $_ } | Select-Object -Unique)
+      $untrackedFiles = $allUntrackedFiles
+    }
+
+    if ($changedFiles.Count -gt 0) {
+      if ($hasHead) {
+        $numstat = @(git diff HEAD --numstat -- $changedFiles)
+        $diffText = git diff HEAD -U0 -- $changedFiles
+      } else {
+        $numstat = @(git diff --cached --numstat -- $changedFiles)
+        $diffText = git diff --cached -U0 -- $changedFiles
+      }
+    } else {
+      $numstat = @()
+      $diffText = @()
+    }
+
     foreach ($line in $numstat) {
       $parts = $line -split "\s+"
       if ($parts.Count -ge 3) {
@@ -184,6 +353,15 @@ try {
         [void][int]::TryParse($parts[0], [ref]$add)
         [void][int]::TryParse($parts[1], [ref]$del)
         $diffLines += $add + $del
+      }
+    }
+
+    foreach ($file in $untrackedFiles) {
+      $absoluteFile = Join-Path $Cwd $file
+      if ((Test-Path -LiteralPath $absoluteFile -PathType Leaf) -and (Get-Item -LiteralPath $absoluteFile).Length -le 1MB) {
+        try {
+          $diffLines += (Get-Content -LiteralPath $absoluteFile -ErrorAction Stop | Measure-Object -Line).Lines
+        } catch {}
       }
     }
 
@@ -203,7 +381,6 @@ try {
       }
     }
 
-    $diffText = git diff HEAD -U0
     $secretPatterns = @(
       "sk-[A-Za-z0-9_-]{20,}",
       '(?i)api[_-]?key\s*[:=]\s*[''"]?[^''"\s]{16,}',
@@ -253,13 +430,18 @@ try {
     }
   }
 
+  $htmlSmoke = Invoke-HtmlSmoke -Files $changedFiles -Root $Cwd
+  if ($null -ne $htmlSmoke) {
+    $steps += $htmlSmoke
+  }
+
   $hardFails = @()
   if (-not $isGit) { $hardFails += "not a git repository, cannot inspect diff safely" }
   if ($forbiddenFiles.Count -gt 0) { $hardFails += "forbidden files changed" }
   if ($secretHits.Count -gt 0) { $hardFails += "possible API key or secret in diff" }
   if ($scopeViolations.Count -gt 0) { $hardFails += "files changed outside allowed paths" }
-  if ($changedFiles.Count -gt $MaxChangedFiles) { $hardFails += "too many changed files: $($changedFiles.Count)" }
-  if ($diffLines -gt $MaxDiffLines) { $hardFails += "diff too large: $diffLines lines" }
+  if ($changedFiles.Count -gt $effectiveMaxChangedFiles) { $hardFails += "too many changed files: $($changedFiles.Count)" }
+  if ($diffLines -gt $effectiveMaxDiffLines) { $hardFails += "diff too large: $diffLines lines" }
   if ($RequirementStatus -eq "fail") { $hardFails += "worker did not satisfy the requested outcome" }
   foreach ($step in $steps) {
     if ($step.Status -ne "pass") {
@@ -271,8 +453,8 @@ try {
   if ($RequirementStatus -eq "unknown") { $score -= 10 }
   if ($RequirementStatus -eq "partial") { $score -= 15 }
   if ($dependencyFiles.Count -gt 0) { $score -= 5 }
-  if ($diffLines -gt [math]::Floor($MaxDiffLines * 0.75)) { $score -= 5 }
-  if ($changedFiles.Count -gt [math]::Floor($MaxChangedFiles * 0.75)) { $score -= 5 }
+  if ($diffLines -gt [math]::Floor($effectiveMaxDiffLines * 0.75)) { $score -= 5 }
+  if ($changedFiles.Count -gt [math]::Floor($effectiveMaxChangedFiles * 0.75)) { $score -= 5 }
   if ($hardFails.Count -gt 0) { $score = [math]::Min($score, 70) }
   $score = [math]::Max(0, $score)
 
@@ -314,9 +496,10 @@ try {
       tests = Get-StepStatus "tests"
       typecheck = Get-StepStatus "type check"
       lint = Get-StepStatus "lint"
+      html_smoke = Get-StepStatus "html smoke"
       scope = $(if ($scopeViolations.Count -eq 0) { "pass" } else { "fail" })
       secrets = $(if ($secretHits.Count -eq 0) { "pass" } else { "fail" })
-      diff_size = $(if ($diffLines -le $MaxDiffLines -and $changedFiles.Count -le $MaxChangedFiles) { "pass" } else { "fail" })
+      diff_size = $(if ($diffLines -le $effectiveMaxDiffLines -and $changedFiles.Count -le $effectiveMaxChangedFiles) { "pass" } else { "fail" })
     }
     changed_files = @($changedFiles)
     scope_violations = @($scopeViolations)
@@ -324,8 +507,9 @@ try {
     metrics = [ordered]@{
       changed_files = $changedFiles.Count
       diff_lines = $diffLines
-      max_changed_files = $MaxChangedFiles
-      max_diff_lines = $MaxDiffLines
+      git_baseline = $gitBaseline
+      max_changed_files = $effectiveMaxChangedFiles
+      max_diff_lines = $effectiveMaxDiffLines
     }
     artifacts = [ordered]@{
       gate_report = $reportPath
@@ -356,6 +540,7 @@ try {
   $lines += "Requirement status: $RequirementStatus"
   $lines += "Workspace: $Cwd"
   $lines += "Git repository: $isGit"
+  $lines += "Git baseline: $gitBaseline"
   $lines += "Changed files: $($changedFiles.Count)"
   $lines += "Diff lines: $diffLines"
   $lines += "Dependency files changed: $($dependencyFiles.Count)"
@@ -369,8 +554,9 @@ try {
   $lines += "- Tests pass: $($(if (($steps | Where-Object Name -eq 'tests').Count -eq 0) { 'not detected' } else { ($steps | Where-Object Name -eq 'tests')[0].Status }))"
   $lines += "- Type check pass: $($(if (($steps | Where-Object Name -eq 'type check').Count -eq 0) { 'not detected' } else { ($steps | Where-Object Name -eq 'type check')[0].Status }))"
   $lines += "- Lint pass: $($(if (($steps | Where-Object Name -eq 'lint').Count -eq 0) { 'not detected' } else { ($steps | Where-Object Name -eq 'lint')[0].Status }))"
+  $lines += "- HTML smoke pass: $($(if (($steps | Where-Object Name -eq 'html smoke').Count -eq 0) { 'not detected' } else { ($steps | Where-Object Name -eq 'html smoke')[0].Status }))"
   $lines += "- Forbidden files unchanged: $([bool]($forbiddenFiles.Count -eq 0))"
-  $lines += "- Diff size acceptable: $([bool]($diffLines -le $MaxDiffLines -and $changedFiles.Count -le $MaxChangedFiles))"
+  $lines += "- Diff size acceptable: $([bool]($diffLines -le $effectiveMaxDiffLines -and $changedFiles.Count -le $effectiveMaxChangedFiles))"
   $lines += "- New dependency files touched: $([bool]($dependencyFiles.Count -gt 0))"
   $lines += "- API key touched: $([bool]($secretHits.Count -gt 0))"
   $lines += ""

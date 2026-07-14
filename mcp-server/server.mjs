@@ -7,7 +7,10 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { evaluateWorkerResult } from "./quality-policy.mjs";
 import { isModelUnavailable, modelSelector } from "./model-selector.mjs";
+import { previewProjectTask, runProjectTask } from "./project-task.mjs";
+import { planTaskTeam } from "./team-planner.mjs";
 import { recordUsage, usageEvent, usageSummary } from "./usage-ledger.mjs";
+import { xaiSearchClient } from "./xai-search.mjs";
 
 const DEFAULT_CHECKLIST = [
   "code can run/build",
@@ -78,10 +81,30 @@ function deepSeekConfig() {
   };
 }
 
+function xaiConfig() {
+  const apiKey = readUserEnv("XAI_API_KEY");
+  if (!apiKey) throw new Error("XAI_API_KEY is not configured.");
+  return {
+    apiKey,
+    baseUrl: process.env.XAI_MCP_BASE_URL || "https://api.x.ai/v1",
+    configuredModel: process.env.XAI_SEARCH_MODEL || "grok-4.20-0309-non-reasoning",
+    mode:
+      process.env.XAI_MODEL_MODE === "fixed" || process.env.AI_TEAM_MODEL_MODE === "fixed"
+        ? "fixed"
+        : "auto",
+  };
+}
+
 function maxTokensForBudget(budget = "low") {
   if (budget === "deep") return 3800;
   if (budget === "normal") return 2000;
   return 900;
+}
+
+function searchTokensForBudget(budget = "low") {
+  if (budget === "deep") return 800;
+  if (budget === "normal") return 550;
+  return 350;
 }
 
 function baseSystem(worker) {
@@ -247,10 +270,42 @@ async function callDeepSeek({ task, context, outputSchema, maxTokens, budget }) 
   throw new Error(lastError || "DeepSeek request failed.");
 }
 
-function routeTask({ task = "", context = "", preferred = "auto" }) {
-  if (["qwen", "deepseek", "both"].includes(preferred)) return preferred;
+async function callGrokSearch({
+  query,
+  source = "x",
+  allowedXHandles = [],
+  fromDate = "",
+  toDate = "",
+  budget = "low",
+}) {
+  const { apiKey, baseUrl, configuredModel, mode } = xaiConfig();
+  return xaiSearchClient.search({
+    query,
+    source,
+    allowedXHandles,
+    fromDate,
+    toDate,
+    maxOutputTokens: searchTokensForBudget(budget),
+    budget,
+    apiKey,
+    baseUrl,
+    configuredModel,
+    mode,
+  });
+}
+
+function routeTask({ task = "", context = "", preferred = "auto", maxAssistants = 3 }) {
+  if (["qwen", "deepseek", "grok", "both"].includes(preferred)) return preferred;
 
   const text = `${task}\n${context}`.toLowerCase();
+  const team = planTaskTeam({ task, context, maxAssistants });
+  const searchWords = [
+    "x.com", "twitter", "search x", "x search", "posts on x", "latest posts",
+    "web search", "search the web", "latest news", "current news", "social sentiment",
+    "latest information", "latest update", "recent update", "breaking news", "official announcement",
+    "推特", "x 上", "x平台", "最新帖子", "最新消息", "最新资讯", "近期动态", "实时消息",
+    "最新版本", "最新价格", "官方公告", "今日新闻", "联网搜索", "网上查证",
+  ];
   const codeWords = [
     "bug", "debug", "fix", "diff", "patch", "typescript", "javascript",
     "python", "powershell", "api", "test", "lint", "typecheck", "build",
@@ -260,18 +315,23 @@ function routeTask({ task = "", context = "", preferred = "auto" }) {
     "summarize", "summary", "docs", "document", "整理", "总结", "文档",
     "清单", "计划", "方案", "提纲", "翻译", "润色",
   ];
-  const complexWords = [
-    "architecture", "复杂", "架构", "多步骤", "方案比较", "review", "审查",
-  ];
-
   const hasCode = codeWords.some((word) => text.includes(word));
   const hasBroad = broadWords.some((word) => text.includes(word));
-  const hasComplex = complexWords.some((word) => text.includes(word));
+  const needsLiveSearch = team.complexity.needs_live_research || searchWords.some((word) => text.includes(word));
 
-  if (hasCode && hasComplex) return "both";
+  if (needsLiveSearch && hasCode && team.use_grok) return "team";
+  if (needsLiveSearch) return "grok";
+  if (team.coding_assistants >= 2) return "both";
   if (hasCode) return "deepseek";
   if (hasBroad) return "qwen";
   return "qwen";
+}
+
+function searchSourceForText(text = "") {
+  const value = String(text).toLowerCase();
+  return /x\.com|twitter|search x|x search|posts? on x|social sentiment|推特|x 上|x平台|帖子|舆论|社区讨论/.test(value)
+    ? "x"
+    : "web";
 }
 
 function result(text) {
@@ -288,29 +348,70 @@ function formattedWorker(name, response, maxChars = 5000) {
   return `Model: ${response.event.model}\nUsage: ${usageSummary(response.event)}\n\n${compactText(response.text, maxChars)}`;
 }
 
+function formattedGrok(response, maxChars = 4500) {
+  const toolCount = response.event.server_side_tools_used ?? 0;
+  const sources = response.citations.length > 0
+    ? `\n\nSources:\n${response.citations.map((url) => `- ${url}`).join("\n")}`
+    : "";
+  return `Model: ${response.event.model}\nUsage: ${usageSummary(response.event)}\nSearch calls: ${toolCount}\n\n${compactText(response.text, maxChars)}${sources}`;
+}
+
 async function delegate(args) {
   const preferred = args.preferred || "auto";
+  const team = planTaskTeam({
+    task: args.task,
+    context: args.context,
+    maxAssistants: args.max_assistants,
+  });
   const route = routeTask({
     task: args.task || "",
     context: args.context || "",
     preferred,
+    maxAssistants: args.max_assistants,
   });
   const maxTokens = maxTokensForBudget(args.budget || "low");
   const task = args.task || "";
   const context = args.context || "";
   const outputSchema = args.output_schema || "";
+  const routingHeader = `Complexity: ${team.complexity.level} (${team.complexity.score})\nAssistants: ${team.assistant_count}\nRoute: ${route}`;
 
   if (args.dry_run === true) {
-    return `Route: ${route}`;
+    return routingHeader;
   }
 
   if (route === "qwen") {
     const qwen = await callQwen({ task, context, outputSchema, maxTokens, budget: args.budget || "low" });
-    return `Route: qwen\n\n## Qwen\n${formattedWorker("Qwen", qwen)}`;
+    return `${routingHeader}\n\n## Qwen\n${formattedWorker("Qwen", qwen)}`;
   }
   if (route === "deepseek") {
     const deepseek = await callDeepSeek({ task, context, outputSchema, maxTokens, budget: args.budget || "low" });
-    return `Route: deepseek\n\n## DeepSeek\n${formattedWorker("DeepSeek", deepseek)}`;
+    return `${routingHeader}\n\n## DeepSeek\n${formattedWorker("DeepSeek", deepseek)}`;
+  }
+  if (route === "grok") {
+    const source = searchSourceForText(`${task}\n${context}`);
+    const grok = await callGrokSearch({
+      query: [task, context ? `Context:\n${context}` : ""].filter(Boolean).join("\n\n"),
+      source,
+      budget: args.budget || "low",
+    });
+    return `${routingHeader}\n\n## Grok Search\n${formattedGrok(grok)}`;
+  }
+
+  if (route === "team") {
+    const source = searchSourceForText(`${task}\n${context}`);
+    const [qwen, deepseek, grok] = await Promise.allSettled([
+      callQwen({ task, context, outputSchema, maxTokens, budget: args.budget || "low" }),
+      callDeepSeek({ task, context, outputSchema, maxTokens, budget: args.budget || "low" }),
+      callGrokSearch({
+        query: [task, context ? `Context:\n${context}` : ""].filter(Boolean).join("\n\n"),
+        source,
+        budget: args.budget || "low",
+      }),
+    ]);
+    const qwenText = qwen.status === "fulfilled" ? formattedWorker("Qwen", qwen.value, 2400) : `FAILED: ${qwen.reason?.message || qwen.reason}`;
+    const deepSeekText = deepseek.status === "fulfilled" ? formattedWorker("DeepSeek", deepseek.value, 2400) : `FAILED: ${deepseek.reason?.message || deepseek.reason}`;
+    const grokText = grok.status === "fulfilled" ? formattedGrok(grok.value, 1800) : `FAILED: ${grok.reason?.message || grok.reason}`;
+    return `${routingHeader}\n\n## Qwen\n${qwenText}\n\n## DeepSeek\n${deepSeekText}\n\n## Grok Search\n${grokText}`;
   }
 
   const [qwen, deepseek] = await Promise.allSettled([
@@ -319,24 +420,72 @@ async function delegate(args) {
   ]);
   const qwenText = qwen.status === "fulfilled" ? formattedWorker("Qwen", qwen.value, 3000) : `FAILED: ${qwen.reason?.message || qwen.reason}`;
   const deepSeekText = deepseek.status === "fulfilled" ? formattedWorker("DeepSeek", deepseek.value, 3000) : `FAILED: ${deepseek.reason?.message || deepseek.reason}`;
-  return `Route: both\n\n## Qwen\n${qwenText}\n\n## DeepSeek\n${deepSeekText}`;
+  return `${routingHeader}\n\n## Qwen\n${qwenText}\n\n## DeepSeek\n${deepSeekText}`;
 }
 
 const tools = [
   {
     name: "delegate_task",
-    description: "Route a task to Qwen, DeepSeek, or both. Set dry_run to preview routing without a model call.",
+    description: "Automatically size a model-only team from one to three assistants based on task complexity. Qwen and DeepSeek handle general work; Grok joins only for complex work that needs current Web/X research. Set dry_run to preview without spending model tokens.",
     inputSchema: {
       type: "object",
       properties: {
         task: { type: "string" },
         context: { type: "string" },
         output_schema: { type: "string" },
-        preferred: { type: "string", enum: ["auto", "qwen", "deepseek", "both"] },
+        preferred: { type: "string", enum: ["auto", "qwen", "deepseek", "grok", "both"] },
+        max_assistants: { type: "integer", minimum: 1, maximum: 3 },
         budget: { type: "string", enum: ["low", "normal", "deep"] },
         dry_run: { type: "boolean" },
       },
       required: ["task"],
+    },
+  },
+  {
+    name: "grok_search",
+    description: "Read-only low-cost live research using one xAI X Search or Web Search call. Returns citations and exact billed USD cost.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", minLength: 1 },
+        source: { type: "string", enum: ["auto", "x", "web"] },
+        allowed_x_handles: {
+          type: "array",
+          maxItems: 20,
+          items: { type: "string" },
+        },
+        from_date: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" },
+        to_date: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" },
+        budget: { type: "string", enum: ["low", "normal", "deep"] },
+        dry_run: { type: "boolean" },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "project_task",
+    description: "Delegate one whole local project phase to an automatically sized AI team. Small work uses one coding assistant; broader work adds a read-only planner; complex time-sensitive work can also add Grok research. Implementation is noninteractive and can run the deterministic quality gate.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task: { type: "string", minLength: 1 },
+        cwd: { type: "string", minLength: 1 },
+        task_id: { type: "string" },
+        mode: { type: "string", enum: ["auto", "inspect", "implement"] },
+        preferred: { type: "string", enum: ["auto", "qwen", "deepseek"] },
+        max_assistants: { type: "integer", minimum: 1, maximum: 3 },
+        budget: { type: "string", enum: ["low", "normal", "deep"] },
+        allowed_paths: {
+          type: "array",
+          maxItems: 20,
+          items: { type: "string", minLength: 1 },
+        },
+        max_minutes: { type: "integer", minimum: 1, maximum: 15 },
+        attempt: { type: "integer", minimum: 1, maximum: 2 },
+        run_gate: { type: "boolean" },
+        dry_run: { type: "boolean" },
+      },
+      required: ["task", "cwd"],
     },
   },
   {
@@ -374,7 +523,7 @@ const tools = [
         checklist: {
           anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
         },
-        preferred: { type: "string", enum: ["auto", "qwen", "deepseek", "both"] },
+        preferred: { type: "string", enum: ["auto", "qwen", "deepseek", "grok", "both"] },
         budget: { type: "string", enum: ["low", "normal", "deep"] },
       },
     },
@@ -382,7 +531,7 @@ const tools = [
 ];
 
 const server = new Server(
-  { name: "ai-team-mcp-server", version: "0.3.0" },
+  { name: "ai-team-mcp-server", version: "0.6.0" },
   { capabilities: { tools: {} } },
 );
 
@@ -394,6 +543,54 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   if (name === "delegate_task") {
     return result(await delegate(args));
+  }
+
+  if (name === "grok_search") {
+    const source = !args.source || args.source === "auto" ? searchSourceForText(args.query) : args.source;
+    if (args.dry_run === true) return result(`Route: grok search (${source}); one server-side tool turn`);
+    const grok = await callGrokSearch({
+      query: args.query,
+      source,
+      allowedXHandles: args.allowed_x_handles || [],
+      fromDate: args.from_date || "",
+      toDate: args.to_date || "",
+      budget: args.budget || "low",
+    });
+    return result(`Route: grok\n\n## Grok Search\n${formattedGrok(grok)}`);
+  }
+
+  if (name === "project_task") {
+    const preview = previewProjectTask(args);
+    let research = null;
+    let researchError = "";
+    if (args.dry_run !== true && preview.team.use_grok) {
+      try {
+        research = await callGrokSearch({
+          query: [
+            "Find only current official documentation, release information, or other time-sensitive facts needed for this engineering task.",
+            String(args.task || ""),
+          ].join("\n\n"),
+          source: searchSourceForText(args.task),
+          budget: "low",
+        });
+      } catch (error) {
+        researchError = compactText(error?.message || error, 500);
+      }
+    }
+    const researchContext = research
+      ? [research.text, research.citations?.length ? `Sources:\n${research.citations.join("\n")}` : ""].filter(Boolean).join("\n\n")
+      : "";
+    const projectResult = await runProjectTask({ ...args, research_context: researchContext });
+    if (research) {
+      projectResult.research = {
+        model: research.event?.model || null,
+        usage: research.event ? usageSummary(research.event) : null,
+        citations: research.citations || [],
+      };
+    } else if (researchError) {
+      projectResult.research = { error: researchError };
+    }
+    return result(JSON.stringify(projectResult, null, 2));
   }
 
   if (name === "worker_gate_review") {
