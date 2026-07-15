@@ -4,6 +4,7 @@ import { access, readdir, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { mechanicalInspect } from "./mechanical-inspector.mjs";
 import { planTaskTeam } from "./team-planner.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -358,6 +359,16 @@ export async function runProjectTask(args = {}) {
   const preview = previewProjectTask(args);
   const allowedPaths = normalizeAllowedPaths(args.allowed_paths || []);
   if (args.dry_run === true) return { ...preview, cwd, allowed_paths: allowedPaths };
+
+  const mechanical = preview.mode === "inspect" && !args.research_context
+    ? await mechanicalInspect(args.task, cwd)
+    : null;
+  if (mechanical) {
+    mechanical.task_id = String(args.task_id || mechanical.task_id || `mechanical-${Date.now()}-${randomUUID().slice(0, 8)}`);
+    mechanical.cwd = cwd;
+    mechanical.allowed_paths = allowedPaths;
+    return mechanical;
+  }
 
   const taskId = String(args.task_id || `project-${Date.now()}-${randomUUID().slice(0, 8)}`);
   const maxMinutes = Math.max(1, Math.min(15, preview.max_minutes));
