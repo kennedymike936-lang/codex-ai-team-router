@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   buildTargetedRetryTask,
   combineScoutPacks,
+  computeProjectDeadline,
   compactPackMetadata,
   ensureGitBaseline,
   previewProjectTask,
@@ -14,6 +15,7 @@ import {
   selectProjectMode,
   selectProjectWorker,
   shouldRunTargetedRetry,
+  usageAvailability,
 } from "./project-task.mjs";
 import { analyzeTaskComplexity, planTaskTeam } from "./team-planner.mjs";
 
@@ -65,6 +67,40 @@ test("allows exactly one targeted internal retry", () => {
   assert.match(task, /attempt 2 of 2/i);
   assert.match(task, /html_smoke/);
   assert.doesNotMatch(task, /lint/);
+});
+
+test("reserves the MCP deadline across planner, retries, and gates", () => {
+  const deadline = computeProjectDeadline({
+    requestedMinutes: 12,
+    mode: "implement",
+    hasPlanner: true,
+    runGate: true,
+    initialAttempt: 1,
+    mcpTimeoutSeconds: 300,
+  });
+  assert.equal(deadline.planner_max_turns, 4);
+  assert.equal(deadline.attempt_count, 2);
+  assert.equal(deadline.clamped, true);
+  assert.ok(deadline.allocated_seconds <= deadline.safe_total_seconds);
+  assert.ok(deadline.safe_total_seconds < deadline.outer_timeout_seconds);
+  assert.ok(deadline.attempt_timeout_seconds[0] > deadline.attempt_timeout_seconds[1]);
+});
+
+test("keeps focused scouts cheap and marks unavailable usage explicitly", () => {
+  const deadline = computeProjectDeadline({
+    requestedMinutes: 2,
+    mode: "inspect",
+    hasPlanner: false,
+    runGate: false,
+    mcpTimeoutSeconds: 300,
+  });
+  assert.equal(deadline.planner_max_turns, 0);
+  assert.equal(deadline.attempt_count, 1);
+  const unavailable = usageAvailability(null, "FatalTurnLimitedError before result event");
+  assert.equal(unavailable.availability, "unavailable");
+  assert.match(unavailable.reason, /FatalTurnLimitedError/);
+  const reported = usageAvailability({ total_tokens: 42, input_tokens: 30, output_tokens: 12 });
+  assert.equal(reported.total_tokens, 42);
 });
 
 test("compacts scout pack metadata without leaking pack content", () => {

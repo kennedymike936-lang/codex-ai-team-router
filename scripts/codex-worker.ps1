@@ -46,7 +46,15 @@ param(
 
   [int]$SummaryMaxChars = 3000,
 
-  [switch]$JsonOnly
+  [switch]$JsonOnly,
+
+  [switch]$UsageParseOnly,
+
+  [string]$UsageParseJsonPath = "",
+
+  [string]$UsageParseErrorPath = "",
+
+  [string]$UsageParseTextPath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -170,44 +178,74 @@ function Convert-QwenJsonOutput {
     [string]$TextPath
   )
 
-  try {
-    $parsed = Get-Content -LiteralPath $JsonPath -Raw | ConvertFrom-Json
-    $messages = @($parsed | ForEach-Object { $_ })
-    $final = $messages | Where-Object { $_.type -eq "result" } | Select-Object -Last 1
-    if (-not $final) {
-      throw "Qwen JSON output did not contain a result event."
+  $messages = @()
+  $raw = $(if (Test-Path -LiteralPath $JsonPath) { Get-Content -LiteralPath $JsonPath -Raw } else { "" })
+  if (-not [string]::IsNullOrWhiteSpace($raw)) {
+    try {
+      $parsed = $raw | ConvertFrom-Json
+      $messages = @($parsed | ForEach-Object { $_ })
+    } catch {
+      foreach ($line in ($raw -split "`r?`n")) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        try { $messages += ($line | ConvertFrom-Json) } catch {}
+      }
     }
+  }
 
+  $final = $messages | Where-Object { $_.type -eq "result" } | Select-Object -Last 1
+  $usageEvent = $messages | Where-Object { $null -ne $_.usage } | Select-Object -Last 1
+  $usage = $(if ($null -ne $final.usage) { $final.usage } elseif ($usageEvent) { $usageEvent.usage } else { $null })
+  $stderrText = ""
+  if (Test-Path -LiteralPath $ErrorPath) {
+    $stderrRaw = Get-Content -LiteralPath $ErrorPath -Raw
+    $stderrText = $(if ($null -ne $stderrRaw) { $stderrRaw.Trim() } else { "" })
+  }
+
+  if ($final) {
     $text = if ($final.is_error) { [string]$final.error.message } else { [string]$final.result }
     if ([string]::IsNullOrWhiteSpace($text)) {
       $text = if ($final.is_error) { "Qwen worker failed without an error message." } else { "Qwen worker completed without a text result." }
     }
     $text | Set-Content -LiteralPath $TextPath -Encoding UTF8
-
-    $usage = $final.usage
-    return [pscustomobject]@{
-      parsed = $true
-      is_error = [bool]$final.is_error
-      error_message = $(if ($final.is_error) { [string]$final.error.message } else { "" })
-      input_tokens = $(if ($null -ne $usage.input_tokens) { [long]$usage.input_tokens } else { $null })
-      output_tokens = $(if ($null -ne $usage.output_tokens) { [long]$usage.output_tokens } else { $null })
-      cache_read_tokens = $(if ($null -ne $usage.cache_read_input_tokens) { [long]$usage.cache_read_input_tokens } else { 0 })
-      total_tokens = $(if ($null -ne $usage.total_tokens) { [long]$usage.total_tokens } else { $null })
-      num_turns = $(if ($null -ne $final.num_turns) { [int]$final.num_turns } else { $null })
-      provider_duration_ms = $(if ($null -ne $final.duration_ms) { [long]$final.duration_ms } else { $null })
-    }
-  } catch {
-    $details = "Failed to parse Qwen JSON output: $($_.Exception.Message)"
-    if (Test-Path -LiteralPath $ErrorPath) {
-      $stderrRaw = Get-Content -LiteralPath $ErrorPath -Raw
-      $stderrText = $(if ($null -ne $stderrRaw) { $stderrRaw.Trim() } else { "" })
-      if (-not [string]::IsNullOrWhiteSpace($stderrText)) {
-        $details += [Environment]::NewLine + $stderrText
-      }
-    }
+    $availability = $(if ($usage) { "reported" } else { "unavailable" })
+    $reason = $(if ($usage) { "Final result event reported usage." } else { "Final result event did not include usage." })
+  } else {
+    $failureType = [regex]::Match($stderrText, '"type"\s*:\s*"(?<type>[^"]+)"').Groups["type"].Value
+    $reason = $(if ($failureType) {
+      "Qwen terminated before a result event ($failureType); CLI usage was not reported."
+    } else {
+      "Qwen output did not contain a result event; CLI usage was not reported."
+    })
+    $availability = $(if ($usage) { "recovered" } else { "unavailable" })
+    if ($usage) { $reason = "Recovered usage from the last structured event before Qwen terminated without a result event." }
+    $details = "Failed to parse Qwen JSON output: $reason"
+    if (-not [string]::IsNullOrWhiteSpace($stderrText)) { $details += [Environment]::NewLine + $stderrText }
     $details | Set-Content -LiteralPath $TextPath -Encoding UTF8
-    return $null
+    $text = $details
   }
+
+  return [pscustomobject]@{
+    parsed = [bool]$final
+    is_error = $(if ($final) { [bool]$final.is_error } else { $true })
+    error_message = $(if ($final -and $final.is_error) { [string]$final.error.message } elseif (-not $final) { $reason } else { "" })
+    availability = $availability
+    availability_reason = $reason
+    input_tokens = $(if ($null -ne $usage.input_tokens) { [long]$usage.input_tokens } else { $null })
+    output_tokens = $(if ($null -ne $usage.output_tokens) { [long]$usage.output_tokens } else { $null })
+    cache_read_tokens = $(if ($null -ne $usage.cache_read_input_tokens) { [long]$usage.cache_read_input_tokens } elseif ($null -ne $usage.cache_read_tokens) { [long]$usage.cache_read_tokens } else { $null })
+    total_tokens = $(if ($null -ne $usage.total_tokens) { [long]$usage.total_tokens } else { $null })
+    num_turns = $(if ($null -ne $final.num_turns) { [int]$final.num_turns } elseif ($null -ne $usageEvent.num_turns) { [int]$usageEvent.num_turns } else { $null })
+    provider_duration_ms = $(if ($null -ne $final.duration_ms) { [long]$final.duration_ms } elseif ($null -ne $usageEvent.duration_ms) { [long]$usageEvent.duration_ms } else { $null })
+  }
+}
+
+if ($UsageParseOnly) {
+  if ([string]::IsNullOrWhiteSpace($UsageParseJsonPath) -or [string]::IsNullOrWhiteSpace($UsageParseTextPath)) {
+    throw "UsageParseOnly requires UsageParseJsonPath and UsageParseTextPath."
+  }
+  Convert-QwenJsonOutput -JsonPath $UsageParseJsonPath -ErrorPath $UsageParseErrorPath -TextPath $UsageParseTextPath |
+    ConvertTo-Json -Compress -Depth 5
+  return
 }
 
 function Get-EstimatedCostCny {
@@ -598,6 +636,8 @@ $workerResult = [ordered]@{
   error = $workerError
   summary = $summaryText
   usage = $(if ($qwenMetrics) { [ordered]@{
+    availability = $qwenMetrics.availability
+    reason = $qwenMetrics.availability_reason
     input_tokens = $qwenMetrics.input_tokens
     output_tokens = $qwenMetrics.output_tokens
     cache_read_tokens = $qwenMetrics.cache_read_tokens
@@ -631,6 +671,8 @@ $ledgerEvent = [ordered]@{
   budget = $Budget
   success = ($workerStatus -eq "success")
   latency_ms = [math]::Round(($workerEndedAt - $workerStartedAt).TotalMilliseconds)
+  usage_availability = $(if ($qwenMetrics) { $qwenMetrics.availability } else { "unavailable" })
+  usage_reason = $(if ($qwenMetrics) { $qwenMetrics.availability_reason } else { "Selected CLI harness did not expose structured usage." })
   input_tokens = $(if ($qwenMetrics) { $qwenMetrics.input_tokens } else { $null })
   output_tokens = $(if ($qwenMetrics) { $qwenMetrics.output_tokens } else { $null })
   cache_read_tokens = $(if ($qwenMetrics) { $qwenMetrics.cache_read_tokens } else { $null })
@@ -638,7 +680,7 @@ $ledgerEvent = [ordered]@{
   num_turns = $(if ($qwenMetrics) { $qwenMetrics.num_turns } else { $null })
   actual_cost = $null
   estimated_cost_cny = $estimatedCostCny
-  cost_note = $(if ($qwenMetrics) { "Exact CLI token usage; CNY cost is a catalog estimate and provider billing is authoritative" } elseif ($Worker -eq "deepseek" -and $DeepSeekHarness -eq "claude") { "CLI actual usage unavailable; Claude harness request cap was USD $DeepSeekMaxBudgetUsd" } else { "CLI actual usage unavailable" })
+  cost_note = $(if ($qwenMetrics -and $qwenMetrics.availability -eq "reported") { "Exact CLI token usage; CNY cost is a catalog estimate and provider billing is authoritative" } elseif ($qwenMetrics -and $qwenMetrics.availability -eq "recovered") { "Usage recovered from a structured pre-failure event; provider billing remains authoritative" } elseif ($Worker -eq "deepseek" -and $DeepSeekHarness -eq "claude") { "CLI actual usage unavailable; Claude harness request cap was USD $DeepSeekMaxBudgetUsd" } else { "CLI usage unavailable; no token or cost value was fabricated" })
   harness = $(if ($Worker -eq "deepseek") { $DeepSeekHarness } else { "qwen" })
   worker_result = $workerResultPath
 }
