@@ -48,6 +48,10 @@ try {
   if ($safeModeCount -ne 2) {
     throw "Expected exactly two Qwen --safe-mode arguments, found $safeModeCount."
   }
+  $sourceText = $sourceLines -join "`n"
+  foreach ($requiredGuidance in @("hard work budget", "one-third of the turns", "Reserve the final 2 turns", "do not create plans or todos")) {
+    if (-not $sourceText.Contains($requiredGuidance)) { throw "Missing turn-budget guidance: $requiredGuidance" }
+  }
 
   function Test-ArgArrayHasSafeMode {
     param([string[]]$Lines, [string]$VarName)
