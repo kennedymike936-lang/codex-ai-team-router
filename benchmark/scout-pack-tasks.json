@@ -1,0 +1,17 @@
+[
+  {
+    "id": "package_identity",
+    "task": "Read mcp-server/package.json and report only the package name and version.",
+    "expected": ["codex-ai-team-router", "0\\.6\\.0"]
+  },
+  {
+    "id": "canvas_gate",
+    "task": "Locate and concisely describe the existing HTML and Canvas validation in the deterministic Gate, including the file and JavaScript syntax check.",
+    "expected": ["codex-gate\\.ps1", "canvas", "node\\s+--check|inline"]
+  },
+  {
+    "id": "staged_single_writer",
+    "task": "Explain how project_task stages a planning scout, one implementation writer, and the deterministic Gate without concurrent workspace writers. Cite the main source file.",
+    "expected": ["project-task\\.mjs", "planner|planning", "worker|writer", "gate", "staged|sequential|one implementation|single"]
+  }
+]

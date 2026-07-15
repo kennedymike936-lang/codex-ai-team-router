@@ -68,7 +68,9 @@ function Get-TaskTerms {
   param([string]$Text)
   $stopWords = @(
     "the", "and", "for", "with", "from", "this", "that", "into", "only", "read", "file", "files",
-    "task", "project", "report", "inspect", "find", "please", "without", "under", "work", "workspace"
+    "task", "project", "report", "inspect", "find", "please", "without", "under", "work", "workspace",
+    "locate", "concisely", "describe", "existing", "including", "explain", "stages", "cite", "main", "one",
+    "deterministic", "current", "how"
   )
   $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
   $terms = @()
@@ -166,18 +168,37 @@ $candidateLines = @($scoredFiles | Sort-Object @{ Expression = "Score"; Descendi
 $matchLines = @()
 $searchTerms = @($terms)
 if ($searchTerms.Count -eq 0) { $searchTerms = @("TODO", "FIXME", "error", "fail") }
-$searchPattern = ($searchTerms | ForEach-Object { [regex]::Escape($_) }) -join "|"
+$expandedTerms = [System.Collections.Generic.List[string]]::new()
+foreach ($term in $searchTerms) {
+  $expandedTerms.Add($term)
+  if ($term.Length -gt 6 -and $term -match '(?i)ing$') { $expandedTerms.Add($term.Substring(0, $term.Length - 3)) }
+  if ($term.Length -gt 7 -and $term -match '(?i)ation$') { $expandedTerms.Add($term.Substring(0, $term.Length - 5)) }
+}
+$searchPattern = (@($expandedTerms | Select-Object -Unique) | ForEach-Object {
+  ([regex]::Escape($_)).Replace("_", "[-_]")
+}) -join "|"
 if ($searchPattern -and (Get-Command rg -ErrorAction SilentlyContinue)) {
-  $rgArgs = @("-n", "-i", "--no-heading", "--color", "never", "--max-count", "2", "-e", $searchPattern)
+  $rgArgs = @("-n", "-i", "--no-heading", "--color", "never", "--max-count", "8", "-e", $searchPattern)
   foreach ($glob in @("*.ps1", "*.mjs", "*.js", "*.ts", "*.tsx", "*.py", "*.go", "*.rs", "*.md", "*.json", "*.toml", "*.yml", "*.yaml", "*.html")) { $rgArgs += @("-g", $glob) }
   foreach ($glob in @("!**/.git/**", "!**/node_modules/**", "!**/dist/**", "!**/build/**", "!**/runs/**", "!**/outputs/**", "!**/.env*", "!**/*.pem", "!**/*.key")) { $rgArgs += @("-g", $glob) }
   $rgArgs += "."
-  $rawMatches = @(Invoke-WorkspaceCommand -Command "rg" -Arguments $rgArgs | Select-Object -First ($MaxMatches * 2))
+  $rawMatches = @(Invoke-WorkspaceCommand -Command "rg" -Arguments $rgArgs | Select-Object -First ($MaxMatches * 8))
+  $scoredMatches = @()
   foreach ($match in $rawMatches) {
     $pathPart = ([string]$match -split ':', 2)[0]
-    if (-not (Test-ExcludedPath -RelativePath $pathPart)) { $matchLines += "match: $(Protect-Line -Text $match)" }
-    if ($matchLines.Count -ge $MaxMatches) { break }
+    if (Test-ExcludedPath -RelativePath $pathPart) { continue }
+    $normalizedMatch = ([string]$match).Replace("-", "_")
+    $normalizedPath = $pathPart.Replace("-", "_")
+    $score = 0
+    foreach ($term in $terms) {
+      $normalizedTerm = $term.Replace("-", "_")
+      if ($normalizedMatch.IndexOf($normalizedTerm, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) { $score += 1 }
+      if ($normalizedPath.IndexOf($normalizedTerm, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) { $score += 2 }
+    }
+    $scoredMatches += [pscustomobject]@{ Score = $score; Text = "match: $(Protect-Line -Text $match)" }
   }
+  $matchLines = @($scoredMatches | Sort-Object @{ Expression = "Score"; Descending = $true }, @{ Expression = "Text"; Descending = $false } |
+    Select-Object -First $MaxMatches | ForEach-Object { $_.Text })
 } else {
   foreach ($candidate in $scoredFiles | Sort-Object Score -Descending | Select-Object -First 20) {
     try {

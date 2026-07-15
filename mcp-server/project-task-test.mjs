@@ -5,6 +5,8 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   buildTargetedRetryTask,
+  combineScoutPacks,
+  compactPackMetadata,
   ensureGitBaseline,
   previewProjectTask,
   requirementStatusForWorker,
@@ -63,6 +65,38 @@ test("allows exactly one targeted internal retry", () => {
   assert.match(task, /attempt 2 of 2/i);
   assert.match(task, /html_smoke/);
   assert.doesNotMatch(task, /lint/);
+});
+
+test("compacts scout pack metadata without leaking pack content", () => {
+  const compacted = compactPackMetadata({
+    enabled: false,
+    reason: "benchmark off",
+    char_count: 123,
+    max_chars: 10000,
+    truncated: false,
+    file_count: 7,
+    match_count: 3,
+    elapsed_ms: 40,
+    wrapper_elapsed_ms: 900,
+    content: "must not propagate",
+  });
+  assert.equal(compacted.enabled, false);
+  assert.equal(compacted.reason, "benchmark off");
+  assert.equal(compacted.wrapper_elapsed_ms, 900);
+  assert.equal("content" in compacted, false);
+});
+
+test("aggregates multiple scout packs with explicit enabled counts", () => {
+  const combined = combineScoutPacks([
+    { enabled: true, char_count: 5000, file_count: 10, match_count: 4, elapsed_ms: 50, wrapper_elapsed_ms: 800 },
+    { enabled: false, reason: "A/B off", char_count: 0, file_count: 0, match_count: 0, elapsed_ms: 0, wrapper_elapsed_ms: 1200 },
+  ]);
+  assert.equal(combined.count, 2);
+  assert.equal(combined.enabled_count, 1);
+  assert.equal(combined.disabled_count, 1);
+  assert.equal(combined.all_enabled, false);
+  assert.equal(combined.total_char_count, 5000);
+  assert.equal(combined.total_wrapper_elapsed_ms, 2000);
 });
 
 test("scales from one assistant to a pair and then a live-research team", () => {

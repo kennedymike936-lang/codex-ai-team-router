@@ -141,6 +141,40 @@ async function runScout({ task, cwd, worker, budget, maxWallTime, timeoutMs, max
   return parseJsonOutput(execution.stdout, `${worker} scout worker`);
 }
 
+export function compactPackMetadata(scoutPack) {
+  if (!scoutPack) return null;
+  return {
+    enabled: Boolean(scoutPack.enabled),
+    reason: String(scoutPack.reason || ""),
+    char_count: Number(scoutPack.char_count || 0),
+    max_chars: Number(scoutPack.max_chars || 0),
+    truncated: Boolean(scoutPack.truncated),
+    file_count: Number(scoutPack.file_count || 0),
+    match_count: Number(scoutPack.match_count || 0),
+    elapsed_ms: Number(scoutPack.elapsed_ms || 0),
+    wrapper_elapsed_ms: Number(scoutPack.wrapper_elapsed_ms || 0),
+  };
+}
+
+export function combineScoutPacks(packs = []) {
+  const present = packs.map(compactPackMetadata).filter(Boolean);
+  if (present.length === 0) return null;
+  const enabledCount = present.filter((pack) => pack.enabled).length;
+  return {
+    all_enabled: enabledCount === present.length,
+    enabled_count: enabledCount,
+    disabled_count: present.length - enabledCount,
+    total_char_count: present.reduce((s, p) => s + (Number(p.char_count) || 0), 0),
+    max_chars: Math.max(...present.map((p) => Number(p.max_chars) || 0)),
+    total_truncated: present.some((p) => p.truncated),
+    total_file_count: present.reduce((s, p) => s + (Number(p.file_count) || 0), 0),
+    total_match_count: present.reduce((s, p) => s + (Number(p.match_count) || 0), 0),
+    total_elapsed_ms: present.reduce((s, p) => s + (Number(p.elapsed_ms) || 0), 0),
+    total_wrapper_elapsed_ms: present.reduce((s, p) => s + (Number(p.wrapper_elapsed_ms) || 0), 0),
+    count: present.length,
+  };
+}
+
 function combineInspectionResults(results) {
   const successful = results.filter((result) => result?.status === "success");
   const usable = successful.length > 0 ? successful : results.filter(Boolean);
@@ -150,12 +184,15 @@ function combineInspectionResults(results) {
     }
     return sum;
   }, { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, total_tokens: 0, num_turns: 0 });
+  const scoutPacks = usable.map((r) => r.scout_pack).filter(Boolean);
   return {
     status: successful.length > 0 ? "success" : "failed",
     model: usable.map((result) => result.model).filter(Boolean).join(", "),
     summary: usable.map((result, index) => `## Scout ${index + 1}\n${result.summary || "No summary."}`).join("\n\n"),
     usage,
     changed_files: [],
+    scout_pack: compactPackMetadata(usable[0]?.scout_pack),
+    scout_packs_combined: combineScoutPacks(scoutPacks),
     artifacts: usable[0]?.artifacts || {},
     team_runs: usable.map((result) => result.artifacts?.run_dir).filter(Boolean),
   };
@@ -397,6 +434,9 @@ export async function runProjectTask(args = {}) {
     model: combinedModels || workerResult.model,
     summary: compact(finalSummary),
     usage: preview.mode === "implement" ? combineUsage(workerResults) : (workerResult.usage || null),
+    scout_pack: preview.mode === "inspect" ? compactPackMetadata(workerResult.scout_pack) : null,
+    scout_packs_combined: preview.mode === "inspect" ? (workerResult.scout_packs_combined || null) : null,
+    planner_scout_pack: preview.mode === "implement" ? compactPackMetadata(plannerResult?.scout_pack) : null,
     changed_files: combinedChangedFiles,
     attempts,
     gate: gate ? {
