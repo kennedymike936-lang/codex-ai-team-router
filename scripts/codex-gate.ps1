@@ -218,6 +218,83 @@ function Invoke-HtmlSmoke {
   }
 }
 
+function Invoke-BrowserSmoke {
+  param([string[]]$Files, [string]$Root)
+
+  $htmlFiles = @($Files | Where-Object { $_ -match "(?i)\.html?$" })
+  if ($htmlFiles.Count -eq 0) { return $null }
+
+  $ps1Path = Join-Path $PSScriptRoot "codex-browser-smoke.ps1"
+  if (-not (Test-Path -LiteralPath $ps1Path)) {
+    return [pscustomobject]@{
+      Name = "browser smoke"
+      Command = "codex-browser-smoke.ps1"
+      Status = "not_detected"
+      ExitCode = 0
+      Output = "Browser smoke script not found at $ps1Path."
+    }
+  }
+
+  $node = Get-Command node -ErrorAction SilentlyContinue
+  if (-not $node) {
+    return [pscustomobject]@{
+      Name = "browser smoke"
+      Command = "codex-browser-smoke.ps1"
+      Status = "not_detected"
+      ExitCode = 0
+      Output = "Node.js is required for the browser smoke test."
+    }
+  }
+
+  try {
+    $raw = & $ps1Path -HtmlFiles $htmlFiles -Root $Root 2>&1 | Out-String
+    $exitCode = $LASTEXITCODE
+
+    try {
+      $parsed = $raw | ConvertFrom-Json
+    } catch {
+      $parsed = $null
+    }
+
+    if ($null -eq $parsed) {
+      return [pscustomobject]@{
+        Name = "browser smoke"
+        Command = "codex-browser-smoke.ps1"
+        Status = "fail"
+        ExitCode = $exitCode
+        Output = "Failed to parse browser smoke output: $raw"
+      }
+    }
+
+    $status = [string]($parsed.status)
+    return [pscustomobject]@{
+      Name = "browser smoke"
+      Command = "codex-browser-smoke.ps1"
+      Status = $status
+      ExitCode = $exitCode
+      Output = ($raw.Trim())
+    }
+  } catch {
+    $errMsg = $_.Exception.Message
+    if ($errMsg -match "not_detected|no browser|no Chromium|skip|not found") {
+      return [pscustomobject]@{
+        Name = "browser smoke"
+        Command = "codex-browser-smoke.ps1"
+        Status = "not_detected"
+        ExitCode = 0
+        Output = "Browser smoke skipped: $errMsg"
+      }
+    }
+    return [pscustomobject]@{
+      Name = "browser smoke"
+      Command = "codex-browser-smoke.ps1"
+      Status = "fail"
+      ExitCode = 1
+      Output = "Browser smoke infrastructure error: $errMsg"
+    }
+  }
+}
+
 if (-not (Test-Path -LiteralPath $Cwd)) {
   throw "Cwd does not exist: $Cwd"
 }
@@ -436,6 +513,10 @@ try {
   if ($null -ne $htmlSmoke) {
     $steps += $htmlSmoke
   }
+  $browserSmoke = Invoke-BrowserSmoke -Files $changedFiles -Root $Cwd
+  if ($null -ne $browserSmoke) {
+    $steps += $browserSmoke
+  }
 
   $hardFails = @()
   if (-not $isGit) { $hardFails += "not a git repository, cannot inspect diff safely" }
@@ -446,7 +527,7 @@ try {
   if ($diffLines -gt $effectiveMaxDiffLines) { $hardFails += "diff too large: $diffLines lines" }
   if ($RequirementStatus -eq "fail") { $hardFails += "worker did not satisfy the requested outcome" }
   foreach ($step in $steps) {
-    if ($step.Status -ne "pass") {
+    if ($step.Status -notin @("pass", "not_detected")) {
       $hardFails += "$($step.Name) did not pass"
     }
   }
@@ -499,6 +580,7 @@ try {
       typecheck = Get-StepStatus "type check"
       lint = Get-StepStatus "lint"
       html_smoke = Get-StepStatus "html smoke"
+      browser_smoke = Get-StepStatus "browser smoke"
       scope = $(if ($scopeViolations.Count -eq 0) { "pass" } else { "fail" })
       secrets = $(if ($secretHits.Count -eq 0) { "pass" } else { "fail" })
       diff_size = $(if ($diffLines -le $effectiveMaxDiffLines -and $changedFiles.Count -le $effectiveMaxChangedFiles) { "pass" } else { "fail" })

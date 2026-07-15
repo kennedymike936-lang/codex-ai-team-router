@@ -66,8 +66,37 @@ try {
   $gamePath = Join-Path $fixture "src\game.html"
   '<!doctype html><canvas id="game"></canvas><script>const ready = true;</script>' | Set-Content -LiteralPath $gamePath -Encoding UTF8
   $validHtml = Invoke-FixtureGate -Attempt 1 -RequirementStatus pass -ChangedPathJson '["src/game.html"]'
-  if ($validHtml.decision -ne "accept" -or $validHtml.checks.html_smoke -ne "pass") {
-    throw "Expected valid inline HTML script to pass the smoke check."
+  if ($validHtml.decision -ne "accept" -or $validHtml.checks.html_smoke -ne "pass" -or $validHtml.checks.browser_smoke -notin @("pass", "not_detected")) {
+    throw "Expected valid inline HTML and browser smoke checks to pass or safely report unavailable browser."
+  }
+  $browserDetected = $validHtml.checks.browser_smoke -eq "pass"
+
+  '<!doctype html><canvas id="game"></canvas><script>setTimeout(() => { throw new Error("runtime fixture"); }, 0);</script>' | Set-Content -LiteralPath $gamePath -Encoding UTF8
+  $runtimeHtml = Invoke-FixtureGate -Attempt 1 -RequirementStatus pass -ChangedPathJson '["src/game.html"]'
+  if ($browserDetected) {
+    if ($runtimeHtml.decision -ne "takeover" -or $runtimeHtml.checks.html_smoke -ne "pass" -or $runtimeHtml.checks.browser_smoke -ne "fail") {
+      throw "Expected a real-browser runtime error to trigger takeover."
+    }
+  } elseif ($runtimeHtml.decision -ne "accept" -or $runtimeHtml.checks.browser_smoke -ne "not_detected") {
+    throw "Expected runtime smoke to degrade safely when no browser is installed."
+  }
+
+  '<!doctype html><main>ordinary HTML</main><script>document.body.dataset.ready = "true";</script>' | Set-Content -LiteralPath $gamePath -Encoding UTF8
+  $nonCanvasHtml = Invoke-FixtureGate -Attempt 1 -RequirementStatus pass -ChangedPathJson '["src/game.html"]'
+  if ($nonCanvasHtml.decision -ne "accept" -or $nonCanvasHtml.checks.html_smoke -ne "pass" -or $nonCanvasHtml.checks.browser_smoke -notin @("pass", "not_detected")) {
+    throw "Expected non-Canvas HTML without runtime errors to pass."
+  }
+
+  $previousBrowserMode = $env:AI_TEAM_BROWSER_SMOKE
+  try {
+    $env:AI_TEAM_BROWSER_SMOKE = "off"
+    $unavailableBrowser = Invoke-FixtureGate -Attempt 1 -RequirementStatus pass -ChangedPathJson '["src/game.html"]'
+    if ($unavailableBrowser.decision -ne "accept" -or $unavailableBrowser.checks.browser_smoke -ne "not_detected") {
+      throw "Expected unavailable-browser mode to be non-fatal and explicitly reported."
+    }
+  } finally {
+    if ($null -eq $previousBrowserMode) { Remove-Item Env:AI_TEAM_BROWSER_SMOKE -ErrorAction SilentlyContinue }
+    else { $env:AI_TEAM_BROWSER_SMOKE = $previousBrowserMode }
   }
 
   '<!doctype html><canvas id="game"></canvas><script>const broken = ;</script>' | Set-Content -LiteralPath $gamePath -Encoding UTF8
@@ -128,7 +157,7 @@ try {
     Pop-Location
   }
 
-  Write-Host "PowerShell gate: 11 scenarios passed"
+  Write-Host "PowerShell gate: 14 scenarios passed"
 } finally {
   if ((Get-Location).Path -eq $fixture) { Pop-Location }
   if (Test-Path -LiteralPath $fixture) {
