@@ -12,6 +12,7 @@ function Invoke-FixtureGate {
     [int]$Attempt,
     [string]$RequirementStatus,
     [string[]]$AllowedPath = @("src"),
+    [string]$AllowedPathJson = "",
     [string]$WorkerRunDir = "",
     [string]$ChangedPathJson = ""
   )
@@ -22,6 +23,7 @@ function Invoke-FixtureGate {
     -Attempt $Attempt `
     -RequirementStatus $RequirementStatus `
     -AllowedPath $AllowedPath `
+    -AllowedPathJson $AllowedPathJson `
     -ChangedPathJson $ChangedPathJson `
     -WorkerRunDir $WorkerRunDir `
     -OutRoot $outRoot `
@@ -51,6 +53,15 @@ try {
   Assert-Decision (Invoke-FixtureGate -Attempt 1 -RequirementStatus pass) "accept" 95
   Assert-Decision (Invoke-FixtureGate -Attempt 1 -RequirementStatus unknown) "retry" 85
   Assert-Decision (Invoke-FixtureGate -Attempt 2 -RequirementStatus unknown) "takeover" 85
+
+  "export const extra = true;" | Set-Content -LiteralPath (Join-Path $fixture "src\extra.js") -Encoding UTF8
+  $jsonArrays = Invoke-FixtureGate -Attempt 1 -RequirementStatus pass `
+    -AllowedPathJson '["src/app.js","src/extra.js"]' `
+    -ChangedPathJson '["src/app.js","src/extra.js"]'
+  if ($jsonArrays.decision -ne "accept" -or $jsonArrays.changed_files.Count -ne 2) {
+    throw "Expected JSON path arrays to preserve two distinct entries."
+  }
+  Remove-Item -LiteralPath (Join-Path $fixture "src\extra.js") -Force
 
   $gamePath = Join-Path $fixture "src\game.html"
   '<!doctype html><canvas id="game"></canvas><script>const ready = true;</script>' | Set-Content -LiteralPath $gamePath -Encoding UTF8
@@ -117,7 +128,7 @@ try {
     Pop-Location
   }
 
-  Write-Host "PowerShell gate: 10 scenarios passed"
+  Write-Host "PowerShell gate: 11 scenarios passed"
 } finally {
   if ((Get-Location).Path -eq $fixture) { Pop-Location }
   if (Test-Path -LiteralPath $fixture) {

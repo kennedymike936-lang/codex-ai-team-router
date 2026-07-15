@@ -223,12 +223,14 @@ if (-not (Test-Path -LiteralPath $Cwd)) {
 }
 $Cwd = (Resolve-Path -LiteralPath $Cwd).Path
 if (-not [string]::IsNullOrWhiteSpace($AllowedPathJson)) {
-  $AllowedPath = @($AllowedPathJson | ConvertFrom-Json | ForEach-Object { [string]$_ })
+  $parsedAllowedPaths = $AllowedPathJson | ConvertFrom-Json
+  $AllowedPath = @($parsedAllowedPaths | ForEach-Object { [string]$_ })
 }
 $hasExplicitChangeSet = -not [string]::IsNullOrWhiteSpace($ChangedPathJson)
 $explicitChangedFiles = @()
 if ($hasExplicitChangeSet) {
-  $explicitChangedFiles = @($ChangedPathJson | ConvertFrom-Json | ForEach-Object { [string]$_ } | Where-Object { $_ })
+  $parsedChangedPaths = $ChangedPathJson | ConvertFrom-Json
+  $explicitChangedFiles = @($parsedChangedPaths | ForEach-Object { [string]$_ } | Where-Object { $_ })
 }
 
 Add-ToolPath

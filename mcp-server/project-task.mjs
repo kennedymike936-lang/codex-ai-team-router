@@ -126,7 +126,7 @@ export async function ensureGitBaseline(cwd, mode) {
   }
 }
 
-async function runScout({ task, cwd, worker, budget, maxWallTime, timeoutMs, maxTurns = 4, summaryMaxChars = 2400 }) {
+async function runScout({ task, cwd, worker, budget, maxWallTime, timeoutMs, maxTurns = 2, summaryMaxChars = 2400 }) {
   const scoutScript = await resolveScript("codex-scout.ps1");
   const execution = await runPowerShell(scoutScript, [
     "-Task", String(task),

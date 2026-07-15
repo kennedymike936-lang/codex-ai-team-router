@@ -285,7 +285,8 @@ if (-not (Test-Path -LiteralPath $Cwd)) {
 }
 $Cwd = (Resolve-Path -LiteralPath $Cwd).Path
 if (-not [string]::IsNullOrWhiteSpace($AllowedPathJson)) {
-  $AllowedPath = @($AllowedPathJson | ConvertFrom-Json | ForEach-Object { [string]$_ })
+  $parsedAllowedPaths = $AllowedPathJson | ConvertFrom-Json
+  $AllowedPath = @($parsedAllowedPaths | ForEach-Object { [string]$_ })
 }
 
 Add-ToolPath
@@ -367,19 +368,39 @@ try {
     }
     $env:OPENAI_BASE_URL = $qwenBaseUrl
     $selectedModel = Resolve-ValueModel -Provider "qwen" -RequestedModel $QwenModel -BudgetTier $Budget -BaseUrl $qwenBaseUrl -ApiKey $openaiKey
+    # Keep each worker independent from the user's global Qwen extensions,
+    # MCP servers, history, and settings. The worker prompt already carries
+    # the bounded task contract, so inherited customizations only add tokens
+    # and make runs less deterministic.
+    $qwenHome = Join-Path $runDir "qwen-home"
+    New-Item -ItemType Directory -Force -Path $qwenHome | Out-Null
+    $env:QWEN_HOME = $qwenHome
 
     $qwenArgs = @(
-      "--prompt", $workerPrompt,
+      # Keep the command line short on Windows. The full worker prompt is
+      # streamed through stdin below; this small value selects headless mode.
+      "--prompt", "Follow the complete task instructions provided on standard input.",
       "--auth-type", "openai",
       "--model", $selectedModel,
       "--openai-base-url", $env:OPENAI_BASE_URL,
       "--approval-mode", $Approval,
       "--max-wall-time", $MaxWallTime,
       "--max-session-turns", ([string]$MaxSessionTurns),
+      "--safe-mode",
       "--output-format", "json"
     )
-    & qwen @qwenArgs 1> $structuredResultPath 2> $qwenErrorPath
-    $workerExitCode = $LASTEXITCODE
+    $previousErrorAction = $ErrorActionPreference
+    try {
+      # Windows PowerShell promotes native stderr from the qwen.ps1 shim to
+      # ErrorRecord objects. With Stop, a JSON diagnostic is truncated to its
+      # first character (usually "{") before we can inspect the exit code and
+      # structured output below.
+      $ErrorActionPreference = "Continue"
+      $workerPrompt | & qwen @qwenArgs 1> $structuredResultPath 2> $qwenErrorPath
+      $workerExitCode = $LASTEXITCODE
+    } finally {
+      $ErrorActionPreference = $previousErrorAction
+    }
     $qwenMetrics = Convert-QwenJsonOutput -JsonPath $structuredResultPath -ErrorPath $qwenErrorPath -TextPath $resultPath
     if (-not $qwenMetrics) {
       $workerExitCode = 1
@@ -447,7 +468,9 @@ try {
       $settingsJson = $qwenSettings | ConvertTo-Json -Depth 8
       [System.IO.File]::WriteAllText($settingsPath, $settingsJson, (New-Object System.Text.UTF8Encoding($false)))
       $deepSeekArgs = @(
-        "--prompt", $workerPrompt,
+        # Avoid Windows command-line truncation for long task and Scout Pack
+        # context. Qwen Code appends piped stdin to this headless prompt.
+        "--prompt", "Follow the complete task instructions provided on standard input.",
         "--auth-type", "openai",
         "--model", $selectedModel,
         "--approval-mode", $Approval,
@@ -455,8 +478,16 @@ try {
         "--max-session-turns", ([string]$MaxSessionTurns),
         "--output-format", "json"
       )
-      & qwen @deepSeekArgs 1> $structuredResultPath 2> $qwenErrorPath
-      $workerExitCode = $LASTEXITCODE
+      $previousErrorAction = $ErrorActionPreference
+      try {
+        # See the Qwen branch above: preserve native stderr for the parser
+        # instead of letting Windows PowerShell terminate on its first line.
+        $ErrorActionPreference = "Continue"
+        $workerPrompt | & qwen @deepSeekArgs 1> $structuredResultPath 2> $qwenErrorPath
+        $workerExitCode = $LASTEXITCODE
+      } finally {
+        $ErrorActionPreference = $previousErrorAction
+      }
       $qwenMetrics = Convert-QwenJsonOutput -JsonPath $structuredResultPath -ErrorPath $qwenErrorPath -TextPath $resultPath
       if (-not $qwenMetrics) {
         $workerExitCode = 1
