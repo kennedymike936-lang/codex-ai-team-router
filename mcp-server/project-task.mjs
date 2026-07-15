@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { mechanicalInspect } from "./mechanical-inspector.mjs";
 import { planTaskTeam } from "./team-planner.mjs";
+import { buildTargetedRetryPrompt, selectTurnPolicy } from "./turn-policy.mjs";
 
 const execFileAsync = promisify(execFile);
 const serverDir = dirname(fileURLToPath(import.meta.url));
@@ -278,18 +279,14 @@ export function computeProjectDeadline({
 }
 
 export function buildTargetedRetryTask(gate = {}, workerResult = {}) {
-  const failedChecks = Object.entries(gate.checks || {})
-    .filter(([, status]) => status === "fail")
-    .map(([name]) => name);
-  return [
+  const turnPolicyPrompt = buildTargetedRetryPrompt({ gate, workerResult });
+  const parts = [
     "Targeted retry: this is attempt 2 of 2. Continue from the current workspace state.",
-    "Fix only the incomplete outcome or failed checks. Preserve working code, keep the diff bounded, and do not broaden scope.",
-    gate.reason ? `Gate reason: ${gate.reason}` : "",
-    gate.requirement_status ? `Requirement status: ${gate.requirement_status}` : "",
-    failedChecks.length > 0 ? `Failed checks: ${failedChecks.join(", ")}` : "",
-    gate.retry?.instruction ? `Gate instruction: ${gate.retry.instruction}` : "",
-    workerResult.summary ? `Previous attempt summary:\n${compact(workerResult.summary, 900)}` : "",
-  ].filter(Boolean).join("\n");
+    turnPolicyPrompt,
+  ];
+  if (gate.retry?.instruction) parts.push(`Gate instruction: ${gate.retry.instruction}`);
+  if (workerResult.summary) parts.push(`Previous attempt summary:\n${compact(workerResult.summary, 900)}`);
+  return parts.filter(Boolean).join("\n");
 }
 
 export function shouldRunTargetedRetry(gate, attempt, finalAttempt = 2) {
@@ -444,6 +441,7 @@ export async function runProjectTask(args = {}) {
       const attemptIndex = attempt - initialAttempt;
       const attemptTimeoutSeconds = deadline.attempt_timeout_seconds[attemptIndex] || deadline.attempt_timeout_seconds.at(-1);
       const attemptWallSeconds = deadline.max_wall_time_seconds[attemptIndex] || deadline.max_wall_time_seconds.at(-1);
+      const turnPolicy = selectTurnPolicy({ complexity: preview.complexity.level, attempt });
       const workerTask = [baseWorkerTask, retryTask].filter(Boolean).join("\n\n");
       const workerArgs = [
         "-Worker", preview.worker,
@@ -454,7 +452,7 @@ export async function runProjectTask(args = {}) {
         "-Approval", preview.approval,
         "-Budget", preview.budget,
         "-MaxWallTime", `${attemptWallSeconds}s`,
-        "-MaxSessionTurns", "8",
+        "-MaxSessionTurns", String(turnPolicy.max_session_turns),
         "-SummaryMaxChars", "2600",
         "-AllowedPathJson", allowedJson,
         "-JsonOnly",
@@ -487,6 +485,7 @@ export async function runProjectTask(args = {}) {
         worker_run: workerResult.artifacts?.run_dir || null,
         gate_decision: gate?.decision || null,
         gate_score: gate?.score ?? null,
+        turn_policy: turnPolicy,
       });
       if (!shouldRunTargetedRetry(gate, attempt, finalAttempt)) break;
       retryTask = buildTargetedRetryTask(gate, workerResult);
@@ -511,6 +510,11 @@ export async function runProjectTask(args = {}) {
     route: preview.worker,
     planner: preview.planner,
     complexity: preview.complexity,
+    turn_policy: {
+      first_attempt: selectTurnPolicy({ complexity: preview.complexity.level, attempt: 1 }),
+      targeted_retry: selectTurnPolicy({ complexity: preview.complexity.level, attempt: 2 }),
+      planner_max_session_turns: deadline.planner_max_turns,
+    },
     team: {
       ...preview.team,
       actual_assistant_count: preview.mode === "inspect"

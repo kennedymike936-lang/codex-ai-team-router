@@ -236,6 +236,10 @@ $score = $(if ($Attempt -eq 1) { 85 } else { 95 })
     assert.equal(result.status, "accept");
     assert.equal(result.attempts.length, 2);
     assert.deepEqual(result.attempts.map((entry) => entry.gate_decision), ["retry", "accept"]);
+    assert.deepEqual(result.attempts.map((entry) => entry.turn_policy.max_session_turns), [6, 4]);
+    assert.equal(result.turn_policy.first_attempt.max_session_turns, 6);
+    assert.equal(result.turn_policy.targeted_retry.max_session_turns, 4);
+    assert.equal(result.turn_policy.planner_max_session_turns, 0);
     assert.deepEqual(result.changed_files, ["out.txt"]);
     assert.equal(result.usage.total_tokens, 24);
     assert.equal(result.artifacts.team_runs.length, 2);
