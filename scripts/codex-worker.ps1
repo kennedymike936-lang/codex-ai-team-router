@@ -514,6 +514,7 @@ try {
         "--approval-mode", $Approval,
         "--max-wall-time", $MaxWallTime,
         "--max-session-turns", ([string]$MaxSessionTurns),
+        "--safe-mode",
         "--output-format", "json"
       )
       $previousErrorAction = $ErrorActionPreference

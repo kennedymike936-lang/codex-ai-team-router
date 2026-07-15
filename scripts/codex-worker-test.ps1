@@ -40,6 +40,48 @@ try {
   }
 
   Write-Host "Worker usage parser: 3 scenarios passed"
+
+  # Source-level safe-mode assertions (line-based to avoid nested-paren issues)
+  $sourcePath = Join-Path $PSScriptRoot "codex-worker.ps1"
+  $sourceLines = Get-Content -LiteralPath $sourcePath
+  $safeModeCount = @($sourceLines | Select-String -SimpleMatch '"--safe-mode"').Count
+  if ($safeModeCount -ne 2) {
+    throw "Expected exactly two Qwen --safe-mode arguments, found $safeModeCount."
+  }
+
+  function Test-ArgArrayHasSafeMode {
+    param([string[]]$Lines, [string]$VarName)
+    $idx = $Lines | Select-String -Pattern ([regex]::Escape($VarName) + '\s*=\s*@\s*\(') | Select-Object -First 1 -ExpandProperty LineNumber
+    if (-not $idx) { throw "Could not locate $VarName array in source." }
+    # Scan forward from array start until closing ) at same or lesser indent
+    for ($i = $idx; $i -lt $Lines.Count; $i++) {
+      $line = $Lines[$i - 1]
+      if ($line -match '--safe-mode') { return $true }
+      # Closing paren on its own line (array terminator)
+      if ($line -match '^\s+\)\s*$' -and $i -gt $idx) { break }
+    }
+    return $false
+  }
+
+  # 1) $qwenArgs must contain --safe-mode
+  if (-not (Test-ArgArrayHasSafeMode -Lines $sourceLines -VarName '$qwenArgs')) {
+    throw "`$qwenArgs must contain --safe-mode."
+  }
+  Write-Host "safe-mode assertion 1: `$qwenArgs has --safe-mode"
+
+  # 2) $deepSeekArgs must contain --safe-mode
+  if (-not (Test-ArgArrayHasSafeMode -Lines $sourceLines -VarName '$deepSeekArgs')) {
+    throw "`$deepSeekArgs must contain --safe-mode."
+  }
+  Write-Host "safe-mode assertion 2: `$deepSeekArgs has --safe-mode"
+
+  # 3) $claudeArgs must NOT contain --safe-mode
+  if (Test-ArgArrayHasSafeMode -Lines $sourceLines -VarName '$claudeArgs') {
+    throw "`$claudeArgs must NOT contain --safe-mode."
+  }
+  Write-Host "safe-mode assertion 3: `$claudeArgs lacks --safe-mode"
+
+  Write-Host "Worker safe-mode: 3 source-level assertions passed"
 } finally {
   if (Test-Path -LiteralPath $fixture) { Remove-Item -LiteralPath $fixture -Recurse -Force }
 }
