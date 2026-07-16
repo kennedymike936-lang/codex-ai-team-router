@@ -193,8 +193,30 @@ function Convert-QwenJsonOutput {
   }
 
   $final = $messages | Where-Object { $_.type -eq "result" } | Select-Object -Last 1
-  $usageEvent = $messages | Where-Object { $null -ne $_.usage } | Select-Object -Last 1
-  $usage = $(if ($null -ne $final.usage) { $final.usage } elseif ($usageEvent) { $usageEvent.usage } else { $null })
+  $usageEvents = @($messages | ForEach-Object {
+    $payload = $(if ($null -ne $_.usage) { $_.usage } elseif ($null -ne $_.message.usage) { $_.message.usage } else { $null })
+    if ($null -ne $payload) { [pscustomobject]@{ event = $_; usage = $payload } }
+  })
+  $lastUsageEvent = $usageEvents | Select-Object -Last 1
+  $recoveredTurns = @($usageEvents | Where-Object {
+    ($null -ne $_.usage.input_tokens -and [long]$_.usage.input_tokens -gt 0) -or
+    ($null -ne $_.usage.output_tokens -and [long]$_.usage.output_tokens -gt 0) -or
+    ($null -ne $_.usage.total_tokens -and [long]$_.usage.total_tokens -gt 0)
+  }).Count
+  $inputValues = @($usageEvents | ForEach-Object { if ($null -ne $_.usage.input_tokens) { [long]$_.usage.input_tokens } })
+  $outputValues = @($usageEvents | ForEach-Object { if ($null -ne $_.usage.output_tokens) { [long]$_.usage.output_tokens } })
+  $cacheValues = @($usageEvents | ForEach-Object { if ($null -ne $_.usage.cache_read_input_tokens) { [long]$_.usage.cache_read_input_tokens } elseif ($null -ne $_.usage.cache_read_tokens) { [long]$_.usage.cache_read_tokens } })
+  $totalValues = @($usageEvents | ForEach-Object { if ($null -ne $_.usage.total_tokens) { [long]$_.usage.total_tokens } })
+  $usage = $(if ($null -ne $final.usage) {
+    $final.usage
+  } elseif ($usageEvents.Count -gt 0) {
+    [pscustomobject]@{
+      input_tokens = $(if ($inputValues.Count -gt 0) { [long](($inputValues | Measure-Object -Sum).Sum) } else { $null })
+      output_tokens = $(if ($outputValues.Count -gt 0) { [long](($outputValues | Measure-Object -Sum).Sum) } else { $null })
+      cache_read_tokens = $(if ($cacheValues.Count -gt 0) { [long](($cacheValues | Measure-Object -Sum).Sum) } else { $null })
+      total_tokens = $(if ($totalValues.Count -gt 0) { [long](($totalValues | Measure-Object -Sum).Sum) } else { $null })
+    }
+  } else { $null })
   $stderrText = ""
   if (Test-Path -LiteralPath $ErrorPath) {
     $stderrRaw = Get-Content -LiteralPath $ErrorPath -Raw
@@ -217,7 +239,10 @@ function Convert-QwenJsonOutput {
       "Qwen output did not contain a result event; CLI usage was not reported."
     })
     $availability = $(if ($usage) { "recovered" } else { "unavailable" })
-    if ($usage) { $reason = "Recovered usage from the last structured event before Qwen terminated without a result event." }
+    if ($usage) {
+      $failureSuffix = $(if ($failureType) { " ($failureType)" } else { "" })
+      $reason = "Recovered usage by summing provider-reported structured events before Qwen terminated$failureSuffix without a result event."
+    }
     $details = "Failed to parse Qwen JSON output: $reason"
     if (-not [string]::IsNullOrWhiteSpace($stderrText)) { $details += [Environment]::NewLine + $stderrText }
     $details | Set-Content -LiteralPath $TextPath -Encoding UTF8
@@ -234,8 +259,8 @@ function Convert-QwenJsonOutput {
     output_tokens = $(if ($null -ne $usage.output_tokens) { [long]$usage.output_tokens } else { $null })
     cache_read_tokens = $(if ($null -ne $usage.cache_read_input_tokens) { [long]$usage.cache_read_input_tokens } elseif ($null -ne $usage.cache_read_tokens) { [long]$usage.cache_read_tokens } else { $null })
     total_tokens = $(if ($null -ne $usage.total_tokens) { [long]$usage.total_tokens } else { $null })
-    num_turns = $(if ($null -ne $final.num_turns) { [int]$final.num_turns } elseif ($null -ne $usageEvent.num_turns) { [int]$usageEvent.num_turns } else { $null })
-    provider_duration_ms = $(if ($null -ne $final.duration_ms) { [long]$final.duration_ms } elseif ($null -ne $usageEvent.duration_ms) { [long]$usageEvent.duration_ms } else { $null })
+    num_turns = $(if ($null -ne $final.num_turns) { [int]$final.num_turns } elseif ($recoveredTurns -gt 0) { [int]$recoveredTurns } else { $null })
+    provider_duration_ms = $(if ($null -ne $final.duration_ms) { [long]$final.duration_ms } elseif ($null -ne $lastUsageEvent.event.duration_ms) { [long]$lastUsageEvent.event.duration_ms } else { $null })
   }
 }
 
@@ -430,7 +455,7 @@ try {
       "--max-wall-time", $MaxWallTime,
       "--max-session-turns", ([string]$MaxSessionTurns),
       "--safe-mode",
-      "--output-format", "json"
+      "--output-format", "stream-json"
     )
     $previousErrorAction = $ErrorActionPreference
     try {
@@ -520,7 +545,7 @@ try {
         "--max-wall-time", $MaxWallTime,
         "--max-session-turns", ([string]$MaxSessionTurns),
         "--safe-mode",
-        "--output-format", "json"
+        "--output-format", "stream-json"
       )
       $previousErrorAction = $ErrorActionPreference
       try {
