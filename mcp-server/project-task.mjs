@@ -4,7 +4,9 @@ import { access, readdir, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { mechanicalInspect } from "./mechanical-inspector.mjs";
 import { planTaskTeam } from "./team-planner.mjs";
+import { buildTargetedRetryPrompt, selectTurnPolicy } from "./turn-policy.mjs";
 
 const execFileAsync = promisify(execFile);
 const serverDir = dirname(fileURLToPath(import.meta.url));
@@ -126,7 +128,7 @@ export async function ensureGitBaseline(cwd, mode) {
   }
 }
 
-async function runScout({ task, cwd, worker, budget, maxWallTime, timeoutMs, maxTurns = 4, summaryMaxChars = 2400 }) {
+async function runScout({ task, cwd, worker, budget, maxWallTime, timeoutMs, maxTurns = 2, summaryMaxChars = 2400 }) {
   const scoutScript = await resolveScript("codex-scout.ps1");
   const execution = await runPowerShell(scoutScript, [
     "-Task", String(task),
@@ -141,6 +143,40 @@ async function runScout({ task, cwd, worker, budget, maxWallTime, timeoutMs, max
   return parseJsonOutput(execution.stdout, `${worker} scout worker`);
 }
 
+export function compactPackMetadata(scoutPack) {
+  if (!scoutPack) return null;
+  return {
+    enabled: Boolean(scoutPack.enabled),
+    reason: String(scoutPack.reason || ""),
+    char_count: Number(scoutPack.char_count || 0),
+    max_chars: Number(scoutPack.max_chars || 0),
+    truncated: Boolean(scoutPack.truncated),
+    file_count: Number(scoutPack.file_count || 0),
+    match_count: Number(scoutPack.match_count || 0),
+    elapsed_ms: Number(scoutPack.elapsed_ms || 0),
+    wrapper_elapsed_ms: Number(scoutPack.wrapper_elapsed_ms || 0),
+  };
+}
+
+export function combineScoutPacks(packs = []) {
+  const present = packs.map(compactPackMetadata).filter(Boolean);
+  if (present.length === 0) return null;
+  const enabledCount = present.filter((pack) => pack.enabled).length;
+  return {
+    all_enabled: enabledCount === present.length,
+    enabled_count: enabledCount,
+    disabled_count: present.length - enabledCount,
+    total_char_count: present.reduce((s, p) => s + (Number(p.char_count) || 0), 0),
+    max_chars: Math.max(...present.map((p) => Number(p.max_chars) || 0)),
+    total_truncated: present.some((p) => p.truncated),
+    total_file_count: present.reduce((s, p) => s + (Number(p.file_count) || 0), 0),
+    total_match_count: present.reduce((s, p) => s + (Number(p.match_count) || 0), 0),
+    total_elapsed_ms: present.reduce((s, p) => s + (Number(p.elapsed_ms) || 0), 0),
+    total_wrapper_elapsed_ms: present.reduce((s, p) => s + (Number(p.wrapper_elapsed_ms) || 0), 0),
+    count: present.length,
+  };
+}
+
 function combineInspectionResults(results) {
   const successful = results.filter((result) => result?.status === "success");
   const usable = successful.length > 0 ? successful : results.filter(Boolean);
@@ -150,12 +186,15 @@ function combineInspectionResults(results) {
     }
     return sum;
   }, { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, total_tokens: 0, num_turns: 0 });
+  const scoutPacks = usable.map((r) => r.scout_pack).filter(Boolean);
   return {
     status: successful.length > 0 ? "success" : "failed",
     model: usable.map((result) => result.model).filter(Boolean).join(", "),
     summary: usable.map((result, index) => `## Scout ${index + 1}\n${result.summary || "No summary."}`).join("\n\n"),
     usage,
     changed_files: [],
+    scout_pack: compactPackMetadata(usable[0]?.scout_pack),
+    scout_packs_combined: combineScoutPacks(scoutPacks),
     artifacts: usable[0]?.artifacts || {},
     team_runs: usable.map((result) => result.artifacts?.run_dir).filter(Boolean),
   };
@@ -163,26 +202,91 @@ function combineInspectionResults(results) {
 
 function combineUsage(results = []) {
   const keys = ["input_tokens", "output_tokens", "cache_read_tokens", "total_tokens", "num_turns"];
+  let anyUnavailable = false;
   const usage = results.reduce((sum, result) => {
-    for (const key of keys) sum[key] += Number(result?.usage?.[key] || 0);
+    const u = result?.usage;
+    if (u && u.availability === "unavailable") {
+      anyUnavailable = true;
+      return sum;
+    }
+    for (const key of keys) sum[key] += Number(u?.[key] || 0);
     return sum;
   }, Object.fromEntries(keys.map((key) => [key, 0])));
-  return Object.values(usage).some((value) => value > 0) ? usage : null;
+  const hasTokens = Object.values(usage).some((value) => value > 0);
+  if (hasTokens) {
+    if (anyUnavailable) usage.availability_note = "Some worker runs did not report usage";
+    return usage;
+  }
+  if (anyUnavailable || results.some((r) => r?.usage?.availability === "unavailable")) {
+    return { availability: "unavailable", reason: "No worker runs reported token usage" };
+  }
+  return null;
+}
+
+export function usageAvailability(usage, reason = "") {
+  if (usage && usage.availability === "unavailable") return usage;
+  if (usage && Object.values(usage).some((v) => Number(v) > 0)) return usage;
+  return {
+    availability: "unavailable",
+    reason: reason || "CLI usage not available; structured output could not be parsed",
+  };
+}
+
+const MCP_TIMEOUT_SECONDS = Number(process.env.AI_TEAM_MCP_TIMEOUT_SECONDS) || 300;
+
+export function computeProjectDeadline({
+  requestedMinutes = 5,
+  mode = "implement",
+  hasPlanner = false,
+  runGate = true,
+  initialAttempt = 1,
+  mcpTimeoutSeconds = MCP_TIMEOUT_SECONDS,
+} = {}) {
+  const outerSeconds = Math.max(90, Number(mcpTimeoutSeconds) || 300);
+  const safeTotalSeconds = Math.max(60, outerSeconds - 25);
+  const attemptCount = mode === "implement" && runGate && initialAttempt < 2 ? 2 : 1;
+  const gateSecondsEach = runGate ? 15 : 0;
+  const overheadSeconds = 10;
+  const plannerTimeoutSeconds = hasPlanner ? Math.min(45, Math.max(30, Math.floor(safeTotalSeconds * 0.16))) : 0;
+  const workerPoolSeconds = Math.max(
+    30,
+    safeTotalSeconds - overheadSeconds - plannerTimeoutSeconds - (gateSecondsEach * attemptCount),
+  );
+  const requestedSeconds = Math.max(30, Math.floor(Number(requestedMinutes) * 60));
+  const retryTimeoutSeconds = attemptCount === 2
+    ? Math.min(60, Math.max(30, Math.floor(workerPoolSeconds * 0.28)))
+    : 0;
+  const firstTimeoutSeconds = Math.min(requestedSeconds + 8, workerPoolSeconds - retryTimeoutSeconds);
+  const attemptTimeoutSeconds = attemptCount === 2
+    ? [Math.max(30, firstTimeoutSeconds), Math.max(30, Math.min(requestedSeconds + 8, retryTimeoutSeconds))]
+    : [Math.max(30, Math.min(requestedSeconds + 8, workerPoolSeconds))];
+  const maxWallTimeSeconds = attemptTimeoutSeconds.map((seconds) => Math.max(22, seconds - 8));
+  const allocatedSeconds = overheadSeconds + plannerTimeoutSeconds
+    + (gateSecondsEach * attemptCount) + attemptTimeoutSeconds.reduce((sum, seconds) => sum + seconds, 0);
+  return {
+    outer_timeout_seconds: outerSeconds,
+    safe_total_seconds: safeTotalSeconds,
+    safety_buffer_seconds: outerSeconds - safeTotalSeconds,
+    planner_max_turns: hasPlanner ? 4 : 0,
+    planner_timeout_seconds: plannerTimeoutSeconds,
+    attempt_timeout_seconds: attemptTimeoutSeconds,
+    max_wall_time_seconds: maxWallTimeSeconds,
+    gate_timeout_seconds: gateSecondsEach,
+    attempt_count: attemptCount,
+    allocated_seconds: allocatedSeconds,
+    clamped: attemptTimeoutSeconds.some((seconds) => seconds < requestedSeconds + 8),
+  };
 }
 
 export function buildTargetedRetryTask(gate = {}, workerResult = {}) {
-  const failedChecks = Object.entries(gate.checks || {})
-    .filter(([, status]) => status === "fail")
-    .map(([name]) => name);
-  return [
+  const turnPolicyPrompt = buildTargetedRetryPrompt({ gate, workerResult });
+  const parts = [
     "Targeted retry: this is attempt 2 of 2. Continue from the current workspace state.",
-    "Fix only the incomplete outcome or failed checks. Preserve working code, keep the diff bounded, and do not broaden scope.",
-    gate.reason ? `Gate reason: ${gate.reason}` : "",
-    gate.requirement_status ? `Requirement status: ${gate.requirement_status}` : "",
-    failedChecks.length > 0 ? `Failed checks: ${failedChecks.join(", ")}` : "",
-    gate.retry?.instruction ? `Gate instruction: ${gate.retry.instruction}` : "",
-    workerResult.summary ? `Previous attempt summary:\n${compact(workerResult.summary, 900)}` : "",
-  ].filter(Boolean).join("\n");
+    turnPolicyPrompt,
+  ];
+  if (gate.retry?.instruction) parts.push(`Gate instruction: ${gate.retry.instruction}`);
+  if (workerResult.summary) parts.push(`Previous attempt summary:\n${compact(workerResult.summary, 900)}`);
+  return parts.filter(Boolean).join("\n");
 }
 
 export function shouldRunTargetedRetry(gate, attempt, finalAttempt = 2) {
@@ -253,10 +357,29 @@ export async function runProjectTask(args = {}) {
   const allowedPaths = normalizeAllowedPaths(args.allowed_paths || []);
   if (args.dry_run === true) return { ...preview, cwd, allowed_paths: allowedPaths };
 
+  const mechanical = preview.mode === "inspect" && !args.research_context
+    ? await mechanicalInspect(args.task, cwd)
+    : null;
+  if (mechanical) {
+    mechanical.task_id = String(args.task_id || mechanical.task_id || `mechanical-${Date.now()}-${randomUUID().slice(0, 8)}`);
+    mechanical.cwd = cwd;
+    mechanical.allowed_paths = allowedPaths;
+    return mechanical;
+  }
+
   const taskId = String(args.task_id || `project-${Date.now()}-${randomUUID().slice(0, 8)}`);
   const maxMinutes = Math.max(1, Math.min(15, preview.max_minutes));
-  const maxWallTime = `${maxMinutes}m`;
-  const timeoutMs = (maxMinutes + 4) * 60 * 1000;
+  const initialAttempt = Number(args.attempt) === 2 ? 2 : 1;
+  const finalAttempt = preview.run_gate !== false ? 2 : initialAttempt;
+  const hasPlanner = preview.mode === "implement" && preview.team.coding_assistants >= 2;
+  const deadline = computeProjectDeadline({
+    requestedMinutes: maxMinutes,
+    mode: preview.mode,
+    hasPlanner,
+    runGate: preview.run_gate !== false,
+    initialAttempt,
+  });
+  const gateTimeoutMs = Math.max(1, deadline.gate_timeout_seconds) * 1000;
   const allowedJson = JSON.stringify(allowedPaths);
   const gitBaseline = await ensureGitBaseline(cwd, preview.mode);
   let plannerResult = null;
@@ -275,8 +398,8 @@ export async function runProjectTask(args = {}) {
       cwd,
       worker,
       budget: preview.budget,
-      maxWallTime,
-      timeoutMs,
+      maxWallTime: `${deadline.max_wall_time_seconds[0]}s`,
+      timeoutMs: deadline.attempt_timeout_seconds[0] * 1000,
     })));
     const results = settled.map((entry) => entry.status === "fulfilled"
       ? entry.value
@@ -295,9 +418,9 @@ export async function runProjectTask(args = {}) {
           cwd,
           worker: preview.planner,
           budget: "low",
-          maxWallTime: `${Math.min(maxMinutes, 5)}m`,
-          timeoutMs,
-          maxTurns: 2,
+          maxWallTime: `${Math.max(22, deadline.planner_timeout_seconds - 8)}s`,
+          timeoutMs: deadline.planner_timeout_seconds * 1000,
+          maxTurns: deadline.planner_max_turns,
           summaryMaxChars: 1600,
         });
       } catch (error) {
@@ -312,11 +435,13 @@ export async function runProjectTask(args = {}) {
     ].filter(Boolean).join("\n\n");
     const workerScript = await resolveScript("codex-worker.ps1");
     const gateScript = preview.run_gate ? await resolveScript("codex-gate.ps1") : null;
-    const initialAttempt = Number(args.attempt) === 2 ? 2 : 1;
-    const finalAttempt = preview.run_gate ? 2 : initialAttempt;
     let retryTask = "";
 
     for (let attempt = initialAttempt; attempt <= finalAttempt; attempt += 1) {
+      const attemptIndex = attempt - initialAttempt;
+      const attemptTimeoutSeconds = deadline.attempt_timeout_seconds[attemptIndex] || deadline.attempt_timeout_seconds.at(-1);
+      const attemptWallSeconds = deadline.max_wall_time_seconds[attemptIndex] || deadline.max_wall_time_seconds.at(-1);
+      const turnPolicy = selectTurnPolicy({ complexity: preview.complexity.level, attempt });
       const workerTask = [baseWorkerTask, retryTask].filter(Boolean).join("\n\n");
       const workerArgs = [
         "-Worker", preview.worker,
@@ -326,13 +451,13 @@ export async function runProjectTask(args = {}) {
         "-Attempt", String(attempt),
         "-Approval", preview.approval,
         "-Budget", preview.budget,
-        "-MaxWallTime", maxWallTime,
-        "-MaxSessionTurns", "8",
+        "-MaxWallTime", `${attemptWallSeconds}s`,
+        "-MaxSessionTurns", String(turnPolicy.max_session_turns),
         "-SummaryMaxChars", "2600",
         "-AllowedPathJson", allowedJson,
         "-JsonOnly",
       ];
-      const workerExecution = await runPowerShell(workerScript, workerArgs, timeoutMs);
+      const workerExecution = await runPowerShell(workerScript, workerArgs, attemptTimeoutSeconds * 1000);
       workerResult = parseJsonOutput(workerExecution.stdout, "Project worker");
       workerResults.push(workerResult);
       for (const file of workerResult.changed_files || []) changedFileSet.add(String(file));
@@ -349,7 +474,7 @@ export async function runProjectTask(args = {}) {
           "-WorkerRunDir", String(workerResult.artifacts?.run_dir || ""),
           "-JsonOnly",
         ];
-        const gateExecution = await runPowerShell(gateScript, gateArgs, timeoutMs);
+        const gateExecution = await runPowerShell(gateScript, gateArgs, gateTimeoutMs);
         gate = parseJsonOutput(gateExecution.stdout, "Project gate");
       }
 
@@ -360,6 +485,7 @@ export async function runProjectTask(args = {}) {
         worker_run: workerResult.artifacts?.run_dir || null,
         gate_decision: gate?.decision || null,
         gate_score: gate?.score ?? null,
+        turn_policy: turnPolicy,
       });
       if (!shouldRunTargetedRetry(gate, attempt, finalAttempt)) break;
       retryTask = buildTargetedRetryTask(gate, workerResult);
@@ -384,6 +510,11 @@ export async function runProjectTask(args = {}) {
     route: preview.worker,
     planner: preview.planner,
     complexity: preview.complexity,
+    turn_policy: {
+      first_attempt: selectTurnPolicy({ complexity: preview.complexity.level, attempt: 1 }),
+      targeted_retry: selectTurnPolicy({ complexity: preview.complexity.level, attempt: 2 }),
+      planner_max_session_turns: deadline.planner_max_turns,
+    },
     team: {
       ...preview.team,
       actual_assistant_count: preview.mode === "inspect"
@@ -391,12 +522,19 @@ export async function runProjectTask(args = {}) {
         : 1 + (plannerResult?.status === "success" ? 1 : 0) + (args.research_context ? 1 : 0),
     },
     budget: preview.budget,
+    deadline,
     git_baseline: gitBaseline,
     status: gate?.decision || workerResult.status,
     worker_status: workerResult.status,
     model: combinedModels || workerResult.model,
     summary: compact(finalSummary),
-    usage: preview.mode === "implement" ? combineUsage(workerResults) : (workerResult.usage || null),
+    usage: usageAvailability(
+      preview.mode === "implement" ? combineUsage(workerResults) : workerResult.usage,
+      workerResult?.error || "CLI usage was not reported",
+    ),
+    scout_pack: preview.mode === "inspect" ? compactPackMetadata(workerResult.scout_pack) : null,
+    scout_packs_combined: preview.mode === "inspect" ? (workerResult.scout_packs_combined || null) : null,
+    planner_scout_pack: preview.mode === "implement" ? compactPackMetadata(plannerResult?.scout_pack) : null,
     changed_files: combinedChangedFiles,
     attempts,
     gate: gate ? {

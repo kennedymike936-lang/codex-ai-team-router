@@ -46,7 +46,15 @@ param(
 
   [int]$SummaryMaxChars = 3000,
 
-  [switch]$JsonOnly
+  [switch]$JsonOnly,
+
+  [switch]$UsageParseOnly,
+
+  [string]$UsageParseJsonPath = "",
+
+  [string]$UsageParseErrorPath = "",
+
+  [string]$UsageParseTextPath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -170,44 +178,99 @@ function Convert-QwenJsonOutput {
     [string]$TextPath
   )
 
-  try {
-    $parsed = Get-Content -LiteralPath $JsonPath -Raw | ConvertFrom-Json
-    $messages = @($parsed | ForEach-Object { $_ })
-    $final = $messages | Where-Object { $_.type -eq "result" } | Select-Object -Last 1
-    if (-not $final) {
-      throw "Qwen JSON output did not contain a result event."
+  $messages = @()
+  $raw = $(if (Test-Path -LiteralPath $JsonPath) { Get-Content -LiteralPath $JsonPath -Raw } else { "" })
+  if (-not [string]::IsNullOrWhiteSpace($raw)) {
+    try {
+      $parsed = $raw | ConvertFrom-Json
+      $messages = @($parsed | ForEach-Object { $_ })
+    } catch {
+      foreach ($line in ($raw -split "`r?`n")) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        try { $messages += ($line | ConvertFrom-Json) } catch {}
+      }
     }
+  }
 
+  $final = $messages | Where-Object { $_.type -eq "result" } | Select-Object -Last 1
+  $usageEvents = @($messages | ForEach-Object {
+    $payload = $(if ($null -ne $_.usage) { $_.usage } elseif ($null -ne $_.message.usage) { $_.message.usage } else { $null })
+    if ($null -ne $payload) { [pscustomobject]@{ event = $_; usage = $payload } }
+  })
+  $lastUsageEvent = $usageEvents | Select-Object -Last 1
+  $recoveredTurns = @($usageEvents | Where-Object {
+    ($null -ne $_.usage.input_tokens -and [long]$_.usage.input_tokens -gt 0) -or
+    ($null -ne $_.usage.output_tokens -and [long]$_.usage.output_tokens -gt 0) -or
+    ($null -ne $_.usage.total_tokens -and [long]$_.usage.total_tokens -gt 0)
+  }).Count
+  $inputValues = @($usageEvents | ForEach-Object { if ($null -ne $_.usage.input_tokens) { [long]$_.usage.input_tokens } })
+  $outputValues = @($usageEvents | ForEach-Object { if ($null -ne $_.usage.output_tokens) { [long]$_.usage.output_tokens } })
+  $cacheValues = @($usageEvents | ForEach-Object { if ($null -ne $_.usage.cache_read_input_tokens) { [long]$_.usage.cache_read_input_tokens } elseif ($null -ne $_.usage.cache_read_tokens) { [long]$_.usage.cache_read_tokens } })
+  $totalValues = @($usageEvents | ForEach-Object { if ($null -ne $_.usage.total_tokens) { [long]$_.usage.total_tokens } })
+  $usage = $(if ($null -ne $final.usage) {
+    $final.usage
+  } elseif ($usageEvents.Count -gt 0) {
+    [pscustomobject]@{
+      input_tokens = $(if ($inputValues.Count -gt 0) { [long](($inputValues | Measure-Object -Sum).Sum) } else { $null })
+      output_tokens = $(if ($outputValues.Count -gt 0) { [long](($outputValues | Measure-Object -Sum).Sum) } else { $null })
+      cache_read_tokens = $(if ($cacheValues.Count -gt 0) { [long](($cacheValues | Measure-Object -Sum).Sum) } else { $null })
+      total_tokens = $(if ($totalValues.Count -gt 0) { [long](($totalValues | Measure-Object -Sum).Sum) } else { $null })
+    }
+  } else { $null })
+  $stderrText = ""
+  if (Test-Path -LiteralPath $ErrorPath) {
+    $stderrRaw = Get-Content -LiteralPath $ErrorPath -Raw
+    $stderrText = $(if ($null -ne $stderrRaw) { $stderrRaw.Trim() } else { "" })
+  }
+
+  if ($final) {
     $text = if ($final.is_error) { [string]$final.error.message } else { [string]$final.result }
     if ([string]::IsNullOrWhiteSpace($text)) {
       $text = if ($final.is_error) { "Qwen worker failed without an error message." } else { "Qwen worker completed without a text result." }
     }
     $text | Set-Content -LiteralPath $TextPath -Encoding UTF8
-
-    $usage = $final.usage
-    return [pscustomobject]@{
-      parsed = $true
-      is_error = [bool]$final.is_error
-      error_message = $(if ($final.is_error) { [string]$final.error.message } else { "" })
-      input_tokens = $(if ($null -ne $usage.input_tokens) { [long]$usage.input_tokens } else { $null })
-      output_tokens = $(if ($null -ne $usage.output_tokens) { [long]$usage.output_tokens } else { $null })
-      cache_read_tokens = $(if ($null -ne $usage.cache_read_input_tokens) { [long]$usage.cache_read_input_tokens } else { 0 })
-      total_tokens = $(if ($null -ne $usage.total_tokens) { [long]$usage.total_tokens } else { $null })
-      num_turns = $(if ($null -ne $final.num_turns) { [int]$final.num_turns } else { $null })
-      provider_duration_ms = $(if ($null -ne $final.duration_ms) { [long]$final.duration_ms } else { $null })
+    $availability = $(if ($usage) { "reported" } else { "unavailable" })
+    $reason = $(if ($usage) { "Final result event reported usage." } else { "Final result event did not include usage." })
+  } else {
+    $failureType = [regex]::Match($stderrText, '"type"\s*:\s*"(?<type>[^"]+)"').Groups["type"].Value
+    $reason = $(if ($failureType) {
+      "Qwen terminated before a result event ($failureType); CLI usage was not reported."
+    } else {
+      "Qwen output did not contain a result event; CLI usage was not reported."
+    })
+    $availability = $(if ($usage) { "recovered" } else { "unavailable" })
+    if ($usage) {
+      $failureSuffix = $(if ($failureType) { " ($failureType)" } else { "" })
+      $reason = "Recovered usage by summing provider-reported structured events before Qwen terminated$failureSuffix without a result event."
     }
-  } catch {
-    $details = "Failed to parse Qwen JSON output: $($_.Exception.Message)"
-    if (Test-Path -LiteralPath $ErrorPath) {
-      $stderrRaw = Get-Content -LiteralPath $ErrorPath -Raw
-      $stderrText = $(if ($null -ne $stderrRaw) { $stderrRaw.Trim() } else { "" })
-      if (-not [string]::IsNullOrWhiteSpace($stderrText)) {
-        $details += [Environment]::NewLine + $stderrText
-      }
-    }
+    $details = "Failed to parse Qwen JSON output: $reason"
+    if (-not [string]::IsNullOrWhiteSpace($stderrText)) { $details += [Environment]::NewLine + $stderrText }
     $details | Set-Content -LiteralPath $TextPath -Encoding UTF8
-    return $null
+    $text = $details
   }
+
+  return [pscustomobject]@{
+    parsed = [bool]$final
+    is_error = $(if ($final) { [bool]$final.is_error } else { $true })
+    error_message = $(if ($final -and $final.is_error) { [string]$final.error.message } elseif (-not $final) { $reason } else { "" })
+    availability = $availability
+    availability_reason = $reason
+    input_tokens = $(if ($null -ne $usage.input_tokens) { [long]$usage.input_tokens } else { $null })
+    output_tokens = $(if ($null -ne $usage.output_tokens) { [long]$usage.output_tokens } else { $null })
+    cache_read_tokens = $(if ($null -ne $usage.cache_read_input_tokens) { [long]$usage.cache_read_input_tokens } elseif ($null -ne $usage.cache_read_tokens) { [long]$usage.cache_read_tokens } else { $null })
+    total_tokens = $(if ($null -ne $usage.total_tokens) { [long]$usage.total_tokens } else { $null })
+    num_turns = $(if ($null -ne $final.num_turns) { [int]$final.num_turns } elseif ($recoveredTurns -gt 0) { [int]$recoveredTurns } else { $null })
+    provider_duration_ms = $(if ($null -ne $final.duration_ms) { [long]$final.duration_ms } elseif ($null -ne $lastUsageEvent.event.duration_ms) { [long]$lastUsageEvent.event.duration_ms } else { $null })
+  }
+}
+
+if ($UsageParseOnly) {
+  if ([string]::IsNullOrWhiteSpace($UsageParseJsonPath) -or [string]::IsNullOrWhiteSpace($UsageParseTextPath)) {
+    throw "UsageParseOnly requires UsageParseJsonPath and UsageParseTextPath."
+  }
+  Convert-QwenJsonOutput -JsonPath $UsageParseJsonPath -ErrorPath $UsageParseErrorPath -TextPath $UsageParseTextPath |
+    ConvertTo-Json -Compress -Depth 5
+  return
 }
 
 function Get-EstimatedCostCny {
@@ -285,7 +348,8 @@ if (-not (Test-Path -LiteralPath $Cwd)) {
 }
 $Cwd = (Resolve-Path -LiteralPath $Cwd).Path
 if (-not [string]::IsNullOrWhiteSpace($AllowedPathJson)) {
-  $AllowedPath = @($AllowedPathJson | ConvertFrom-Json | ForEach-Object { [string]$_ })
+  $parsedAllowedPaths = $AllowedPathJson | ConvertFrom-Json
+  $AllowedPath = @($parsedAllowedPaths | ForEach-Object { [string]$_ })
 }
 
 Add-ToolPath
@@ -309,6 +373,11 @@ You are a background worker called by Codex, who is the marshal and final review
 Do useful work directly when your tool mode allows it. Keep the task tightly scoped.
 Prefer making concrete progress over long discussion.
 This is attempt $Attempt of at most 2. If this is attempt 2, fix only the named failed checks.
+Your entire session is capped at $MaxSessionTurns assistant turns. Treat this as a hard work budget, not a target.
+Spend no more than one-third of the turns on inspection, then make the smallest sufficient change.
+Reserve the final 2 turns for one focused validation command and the final report. Stop as soon as both pass.
+For bounded tasks, do not create plans or todos, spawn agents, use computer control, or re-read unchanged files.
+Combine related reads and checks into one tool call when practical.
 Do not touch secrets, payment data, accounts, unrelated user files, drivers, registry, or system settings unless the user task explicitly asks for it.
 Do not run long downloads or installations unless the task explicitly asks for that.
 Allowed paths: $(if ($AllowedPath.Count -gt 0) { $AllowedPath -join ', ' } else { 'the task-relevant files inside the current workspace' }).
@@ -367,19 +436,39 @@ try {
     }
     $env:OPENAI_BASE_URL = $qwenBaseUrl
     $selectedModel = Resolve-ValueModel -Provider "qwen" -RequestedModel $QwenModel -BudgetTier $Budget -BaseUrl $qwenBaseUrl -ApiKey $openaiKey
+    # Keep each worker independent from the user's global Qwen extensions,
+    # MCP servers, history, and settings. The worker prompt already carries
+    # the bounded task contract, so inherited customizations only add tokens
+    # and make runs less deterministic.
+    $qwenHome = Join-Path $runDir "qwen-home"
+    New-Item -ItemType Directory -Force -Path $qwenHome | Out-Null
+    $env:QWEN_HOME = $qwenHome
 
     $qwenArgs = @(
-      "--prompt", $workerPrompt,
+      # Keep the command line short on Windows. The full worker prompt is
+      # streamed through stdin below; this small value selects headless mode.
+      "--prompt", "Follow the complete task instructions provided on standard input.",
       "--auth-type", "openai",
       "--model", $selectedModel,
       "--openai-base-url", $env:OPENAI_BASE_URL,
       "--approval-mode", $Approval,
       "--max-wall-time", $MaxWallTime,
       "--max-session-turns", ([string]$MaxSessionTurns),
-      "--output-format", "json"
+      "--safe-mode",
+      "--output-format", "stream-json"
     )
-    & qwen @qwenArgs 1> $structuredResultPath 2> $qwenErrorPath
-    $workerExitCode = $LASTEXITCODE
+    $previousErrorAction = $ErrorActionPreference
+    try {
+      # Windows PowerShell promotes native stderr from the qwen.ps1 shim to
+      # ErrorRecord objects. With Stop, a JSON diagnostic is truncated to its
+      # first character (usually "{") before we can inspect the exit code and
+      # structured output below.
+      $ErrorActionPreference = "Continue"
+      $workerPrompt | & qwen @qwenArgs 1> $structuredResultPath 2> $qwenErrorPath
+      $workerExitCode = $LASTEXITCODE
+    } finally {
+      $ErrorActionPreference = $previousErrorAction
+    }
     $qwenMetrics = Convert-QwenJsonOutput -JsonPath $structuredResultPath -ErrorPath $qwenErrorPath -TextPath $resultPath
     if (-not $qwenMetrics) {
       $workerExitCode = 1
@@ -447,16 +536,27 @@ try {
       $settingsJson = $qwenSettings | ConvertTo-Json -Depth 8
       [System.IO.File]::WriteAllText($settingsPath, $settingsJson, (New-Object System.Text.UTF8Encoding($false)))
       $deepSeekArgs = @(
-        "--prompt", $workerPrompt,
+        # Avoid Windows command-line truncation for long task and Scout Pack
+        # context. Qwen Code appends piped stdin to this headless prompt.
+        "--prompt", "Follow the complete task instructions provided on standard input.",
         "--auth-type", "openai",
         "--model", $selectedModel,
         "--approval-mode", $Approval,
         "--max-wall-time", $MaxWallTime,
         "--max-session-turns", ([string]$MaxSessionTurns),
-        "--output-format", "json"
+        "--safe-mode",
+        "--output-format", "stream-json"
       )
-      & qwen @deepSeekArgs 1> $structuredResultPath 2> $qwenErrorPath
-      $workerExitCode = $LASTEXITCODE
+      $previousErrorAction = $ErrorActionPreference
+      try {
+        # See the Qwen branch above: preserve native stderr for the parser
+        # instead of letting Windows PowerShell terminate on its first line.
+        $ErrorActionPreference = "Continue"
+        $workerPrompt | & qwen @deepSeekArgs 1> $structuredResultPath 2> $qwenErrorPath
+        $workerExitCode = $LASTEXITCODE
+      } finally {
+        $ErrorActionPreference = $previousErrorAction
+      }
       $qwenMetrics = Convert-QwenJsonOutput -JsonPath $structuredResultPath -ErrorPath $qwenErrorPath -TextPath $resultPath
       if (-not $qwenMetrics) {
         $workerExitCode = 1
@@ -567,6 +667,8 @@ $workerResult = [ordered]@{
   error = $workerError
   summary = $summaryText
   usage = $(if ($qwenMetrics) { [ordered]@{
+    availability = $qwenMetrics.availability
+    reason = $qwenMetrics.availability_reason
     input_tokens = $qwenMetrics.input_tokens
     output_tokens = $qwenMetrics.output_tokens
     cache_read_tokens = $qwenMetrics.cache_read_tokens
@@ -600,6 +702,8 @@ $ledgerEvent = [ordered]@{
   budget = $Budget
   success = ($workerStatus -eq "success")
   latency_ms = [math]::Round(($workerEndedAt - $workerStartedAt).TotalMilliseconds)
+  usage_availability = $(if ($qwenMetrics) { $qwenMetrics.availability } else { "unavailable" })
+  usage_reason = $(if ($qwenMetrics) { $qwenMetrics.availability_reason } else { "Selected CLI harness did not expose structured usage." })
   input_tokens = $(if ($qwenMetrics) { $qwenMetrics.input_tokens } else { $null })
   output_tokens = $(if ($qwenMetrics) { $qwenMetrics.output_tokens } else { $null })
   cache_read_tokens = $(if ($qwenMetrics) { $qwenMetrics.cache_read_tokens } else { $null })
@@ -607,7 +711,7 @@ $ledgerEvent = [ordered]@{
   num_turns = $(if ($qwenMetrics) { $qwenMetrics.num_turns } else { $null })
   actual_cost = $null
   estimated_cost_cny = $estimatedCostCny
-  cost_note = $(if ($qwenMetrics) { "Exact CLI token usage; CNY cost is a catalog estimate and provider billing is authoritative" } elseif ($Worker -eq "deepseek" -and $DeepSeekHarness -eq "claude") { "CLI actual usage unavailable; Claude harness request cap was USD $DeepSeekMaxBudgetUsd" } else { "CLI actual usage unavailable" })
+  cost_note = $(if ($qwenMetrics -and $qwenMetrics.availability -eq "reported") { "Exact CLI token usage; CNY cost is a catalog estimate and provider billing is authoritative" } elseif ($qwenMetrics -and $qwenMetrics.availability -eq "recovered") { "Usage recovered from a structured pre-failure event; provider billing remains authoritative" } elseif ($Worker -eq "deepseek" -and $DeepSeekHarness -eq "claude") { "CLI actual usage unavailable; Claude harness request cap was USD $DeepSeekMaxBudgetUsd" } else { "CLI usage unavailable; no token or cost value was fabricated" })
   harness = $(if ($Worker -eq "deepseek") { $DeepSeekHarness } else { "qwen" })
   worker_result = $workerResultPath
 }

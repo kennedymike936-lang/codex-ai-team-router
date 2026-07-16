@@ -26,6 +26,9 @@ if (-not [string]::IsNullOrWhiteSpace($DeployRoot)) {
     Copy-Item -LiteralPath $_.FullName -Destination $scriptDir -Force
     Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $DeployRoot $_.Name) -Force
   }
+  Get-ChildItem -LiteralPath (Join-Path $repoRoot "scripts") -Filter "*.mjs" -File | ForEach-Object {
+    Copy-Item -LiteralPath $_.FullName -Destination $scriptDir -Force
+  }
 }
 
 Push-Location $serverDir
