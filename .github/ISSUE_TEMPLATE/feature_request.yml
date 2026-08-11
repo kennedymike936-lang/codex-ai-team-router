@@ -1,0 +1,30 @@
+name: Feature request
+description: Propose a focused improvement to routing, validation, documentation, or maintainer workflows.
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What maintainer problem should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the smallest useful change.
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Security and cost impact
+      description: Explain effects on shell, files, network, credentials, logs, dependencies, model calls, or token cost.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

@@ -1,0 +1,51 @@
+name: Bug report
+description: Report a reproducible problem that does not contain sensitive security details.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include API keys, private prompts, account data, or security exploit details. Use private vulnerability reporting for security issues.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Version or commit
+      placeholder: v0.6.0 or commit SHA
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Windows version, PowerShell version, Node.js version, and worker harness.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Provide the smallest safe reproduction without credentials or private data.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized output
+      description: Paste only the relevant, redacted output.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: I removed credentials, private prompts, and account data.
+          required: true
+        - label: This report does not disclose a security vulnerability publicly.
+          required: true

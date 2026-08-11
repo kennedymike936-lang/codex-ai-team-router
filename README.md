@@ -1,5 +1,7 @@
 # Codex AI Team Router
 
+[English](README.en.md) | 简体中文
+
 让 Codex 做项目经理和最终审稿人，把文档与初步分析交给 Qwen、代码杂活交给 DeepSeek，把实时 Web / X 信息侦查交给 Grok Search。
 
 项目通过一个轻量 MCP Router 自动选择副手，并用本地 PowerShell 脚本完成项目侦查、受控执行和验收报告。完整过程保存在磁盘中，Codex 只接收紧凑摘要，避免命令输出和长日志持续撑大主对话上下文。
@@ -487,6 +489,8 @@ npm run probe:xai
 在一次本地调试记录中，未限制输出时上下文曾从约 18k 增长到 153k；第一轮输出优化后，同类过程约增长到 63k。这个数字只用于说明长工具输出的影响，不是通用 benchmark，也不代表你的账户一定获得同样比例的节省。
 
 ## 安全说明
+
+完整的信任边界、安全使用基线和私密漏洞报告流程见 [SECURITY.md](SECURITY.md)。
 
 - 本项目不会把 API key 写入源代码。
 - MCP 和脚本会读取用户环境变量中的 key。
