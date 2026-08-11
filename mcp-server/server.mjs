@@ -11,6 +11,7 @@ import { previewProjectTask, runProjectTask } from "./project-task.mjs";
 import { planTaskTeam } from "./team-planner.mjs";
 import { recordUsage, usageEvent, usageSummary } from "./usage-ledger.mjs";
 import { xaiSearchClient } from "./xai-search.mjs";
+import { createBudgetRouter } from "./budget-router.mjs";
 
 const DEFAULT_CHECKLIST = [
   "code can run/build",
@@ -94,6 +95,36 @@ function xaiConfig() {
         : "auto",
   };
 }
+
+function openRouterConfig() {
+  return {
+    apiKey: readUserEnv("OPENROUTER_API_KEY"),
+    baseUrl: process.env.OPENROUTER_MCP_BASE_URL || "https://openrouter.ai/api/v1",
+  };
+}
+
+function groqConfig() {
+  return {
+    apiKey: readUserEnv("GROQ_API_KEY"),
+    baseUrl: process.env.GROQ_MCP_BASE_URL || "https://api.groq.com/openai/v1",
+  };
+}
+
+function budgetRouterMetadata() {
+  const value = process.env.AI_TEAM_MODEL_METADATA_JSON;
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    throw new Error("AI_TEAM_MODEL_METADATA_JSON must be a valid JSON object.");
+  }
+}
+
+const budgetRouter = createBudgetRouter({
+  allowOpenRouterFreeFallback: process.env.AI_TEAM_OPENROUTER_FREE_FALLBACK === "true",
+  modelMetadata: budgetRouterMetadata(),
+});
 
 function maxTokensForBudget(budget = "low") {
   if (budget === "deep") return 3800;
@@ -463,6 +494,47 @@ const tools = [
     },
   },
   {
+    name: "budget_route",
+    description: "Free-tier-aware, capability-aware routing across OpenRouter and Groq. dry_run defaults to true: it may discover models but never sends a chat-completion request. Actual execution uses only configured provider keys and falls back only on quota, rate-limit, capacity, or 5xx responses.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task: { type: "string", minLength: 1 },
+        messages: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              role: { type: "string", enum: ["system", "user", "assistant"] },
+              content: { type: "string" },
+            },
+            required: ["role", "content"],
+          },
+        },
+        mode: { type: "string", enum: ["free_only", "balanced", "quality_first"] },
+        providers: {
+          type: "array",
+          items: { type: "string", enum: ["openrouter", "groq"] },
+        },
+        requirements: {
+          type: "object",
+          properties: {
+            capabilities: {
+              type: "array",
+              items: { type: "string", enum: ["code", "tools", "web"] },
+            },
+            min_context_length: { type: "number" },
+            sensitive: { type: "boolean" },
+            require_zero_data_retention: { type: "boolean" },
+          },
+        },
+        max_tokens: { type: "integer", minimum: 1, maximum: 128000 },
+        dry_run: { type: "boolean" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "project_task",
     description: "Delegate one whole local project phase to an automatically sized AI team. Small work uses one coding assistant; broader work adds a read-only planner; complex time-sensitive work can also add Grok research. Implementation is noninteractive and can run the deterministic quality gate.",
     inputSchema: {
@@ -531,7 +603,7 @@ const tools = [
 ];
 
 const server = new Server(
-  { name: "ai-team-mcp-server", version: "0.6.0" },
+  { name: "ai-team-mcp-server", version: "0.7.0" },
   { capabilities: { tools: {} } },
 );
 
@@ -543,6 +615,38 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   if (name === "delegate_task") {
     return result(await delegate(args));
+  }
+
+  if (name === "budget_route") {
+    const dryRun = args.dry_run !== false;
+    const mode = args.mode || "balanced";
+    const providers = args.providers || ["openrouter", "groq"];
+    const requirements = args.requirements || {};
+    const maxTokens = args.max_tokens || 1024;
+
+    if (!args.task && (!Array.isArray(args.messages) || args.messages.length === 0)) {
+      throw new Error("budget_route requires task or at least one message.");
+    }
+    const openrouter = openRouterConfig();
+    const groq = groqConfig();
+    const apiKeys = { openrouter: openrouter.apiKey, groq: groq.apiKey };
+    const baseUrls = { openrouter: openrouter.baseUrl, groq: groq.baseUrl };
+    const messages = args.messages || [{ role: "user", content: args.task }];
+
+    const outcome = await budgetRouter.execute({
+      candidates: null,
+      mode,
+      requirements,
+      providers,
+      apiKeys,
+      baseUrls,
+      fetchImpl: fetch,
+      messages,
+      max_tokens: maxTokens,
+      dry_run: dryRun,
+    });
+
+    return result(JSON.stringify(outcome, null, 2));
   }
 
   if (name === "grok_search") {
