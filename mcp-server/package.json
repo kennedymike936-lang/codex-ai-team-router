@@ -1,11 +1,24 @@
 {
   "name": "codex-ai-team-router",
   "version": "0.6.0",
+  "description": "Codex-led Qwen and DeepSeek AI team router via MCP, with bounded workers and deterministic safety gates.",
   "type": "module",
   "private": true,
   "main": "server.mjs",
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kennedymike936-lang/codex-ai-team-router.git"
+  },
+  "bugs": {
+    "url": "https://github.com/kennedymike936-lang/codex-ai-team-router/issues"
+  },
+  "homepage": "https://github.com/kennedymike936-lang/codex-ai-team-router#readme",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.18.0"
+    "@modelcontextprotocol/sdk": "^1.30.0"
   },
   "scripts": {
     "start": "node server.mjs",

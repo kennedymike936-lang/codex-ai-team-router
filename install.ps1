@@ -33,7 +33,11 @@ if (-not [string]::IsNullOrWhiteSpace($DeployRoot)) {
 
 Push-Location $serverDir
 try {
-  npm install
+  if (Test-Path -LiteralPath (Join-Path $serverDir "package-lock.json")) {
+    npm ci
+  } else {
+    npm install
+  }
   npm test
 } finally {
   Pop-Location

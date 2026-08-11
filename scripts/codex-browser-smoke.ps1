@@ -33,10 +33,21 @@ if (-not $node) {
   exit 0
 }
 
-$argList = @($HtmlFiles) + @("--root", $Root)
+$nodeArgs = @()
+$nodeMajor = 0
+try {
+  $nodeMajor = [int]((& $node.Source -p "process.versions.node.split('.')[0]") | Select-Object -First 1)
+} catch {
+  $nodeMajor = 0
+}
+if ($nodeMajor -eq 20) {
+  # Node 20 ships the WebSocket API behind this flag; Node 22+ enables it by default.
+  $nodeArgs += "--experimental-websocket"
+}
+$argList = @($nodeArgs) + @($smokeMjs) + @($HtmlFiles) + @("--root", $Root)
 
 try {
-  $output = & $node.Source $smokeMjs @argList 2>&1 | Out-String
+  $output = & $node.Source @argList 2>&1 | Out-String
   $exitCode = $LASTEXITCODE
 
   if ($exitCode -eq 0) {
