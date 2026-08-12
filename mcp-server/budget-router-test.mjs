@@ -9,6 +9,7 @@ import {
   normalizeOpenAiCompatibleModel,
   normalizeOpenAiResponsesResponse,
   normalizeOpenRouterModel,
+  normalizeSiliconFlowModel,
   parseRateLimitHeaders,
   registeredProviders,
   redactHeaders,
@@ -19,6 +20,7 @@ import { createBudgetRouter, scoreCandidate } from "./budget-router.mjs";
 const OPENROUTER_TEST_CREDENTIAL = "openrouter-test-value";
 const GROQ_TEST_CREDENTIAL = "groq-test-value";
 const GEMINI_TEST_CREDENTIAL = "gemini-test-value";
+const SILICONFLOW_TEST_CREDENTIAL = ["sk", "siliconflow-test-value"].join("-");
 
 function credentialArgs(credential) {
   return { ["api" + "Key"]: credential };
@@ -61,6 +63,7 @@ function successBody(content = "ok") {
 
 assert.equal(redactKeys("Bearer sample-secret-value"), "Bearer ***REDACTED***");
 assert.equal(redactKeys(`failure ${OPENROUTER_TEST_CREDENTIAL}`, [OPENROUTER_TEST_CREDENTIAL]), "failure ***REDACTED***");
+assert.equal(redactKeys(`failure ${SILICONFLOW_TEST_CREDENTIAL}`), "failure ***REDACTED***");
 assert.deepEqual(redactHeaders({ Authorization: "Bearer hidden", Accept: "json" }), { Authorization: "***REDACTED***", Accept: "json" });
 assert.deepEqual(redactHeaders({ "x-goog-api-key": "hidden" }), { "x-goog-api-key": "***REDACTED***" });
 
@@ -104,6 +107,15 @@ assert.equal(geminiUnknown.id, "gemini-test");
 assert.equal(geminiUnknown.is_free, false);
 assert.equal(geminiUnknown.is_zero_data_retention, false);
 assert.deepEqual(geminiUnknown.pricing, { input: null, output: null });
+
+const siliconFlowUnknown = normalizeSiliconFlowModel({ id: "vendor/chat-model" });
+assert.equal(siliconFlowUnknown.provider, "siliconflow");
+assert.equal(siliconFlowUnknown.data_boundary, "siliconflow_cloud");
+assert.equal(siliconFlowUnknown.privacy_sensitive_task_policy, "deny");
+assert.equal(siliconFlowUnknown.content_policy, "restricted");
+assert.equal(siliconFlowUnknown.is_free, false);
+assert.equal(siliconFlowUnknown.is_zero_data_retention, false);
+assert.deepEqual(siliconFlowUnknown.pricing, { input: null, output: null });
 
 assert.deepEqual(geminiContentsFromMessages([
   { role: "system", content: "Be precise" },
@@ -150,8 +162,9 @@ assert.equal(adapterForProvider("openrouter", async () => {}).isSafeFallbackStat
 assert.equal(adapterForProvider("openrouter", async () => {}).isSafeFallbackStatus(429), true);
 assert.equal(adapterForProvider("groq", async () => {}).isSafeFallbackStatus(498), true);
 assert.equal(adapterForProvider("groq", async () => {}).isAuthOrPermissionStop(401), true);
-assert.deepEqual(registeredProviders(), ["gemini", "groq", "openai", "openai_compatible", "openrouter"]);
-assert.throws(() => adapterForProvider("unknown", async () => {}), /Supported: gemini, groq, openai, openai_compatible, openrouter/);
+assert.equal(adapterForProvider("siliconflow", async () => {}).isSafeFallbackStatus(429), true);
+assert.deepEqual(registeredProviders(), ["gemini", "groq", "openai", "openai_compatible", "openrouter", "siliconflow"]);
+assert.throws(() => adapterForProvider("unknown", async () => {}), /Supported: gemini, groq, openai, openai_compatible, openrouter, siliconflow/);
 
 const normalizedResponses = normalizeOpenAiResponsesResponse({
   status: "completed",
@@ -176,6 +189,19 @@ assert.deepEqual(normalizedResponses.usage, { input_tokens: 6, output_tokens: 2 
   assert.equal(request.url, "https://router.invalid/v1/models");
   assert.equal(request.options.headers.authorization, `Bearer ${OPENROUTER_TEST_CREDENTIAL}`);
   assert.equal(models[0].is_free, true);
+}
+
+{
+  let request;
+  const adapter = adapterForProvider("siliconflow", async (url, options) => {
+    request = { url, options };
+    return response(200, { data: [{ id: "vendor/chat-model" }] });
+  });
+  const models = await adapter.discoverModels(credentialArgs(SILICONFLOW_TEST_CREDENTIAL));
+  assert.equal(request.url, "https://api.siliconflow.cn/v1/models?type=text&sub_type=chat");
+  assert.equal(request.options.headers.authorization, `Bearer ${SILICONFLOW_TEST_CREDENTIAL}`);
+  assert.equal(models[0].provider, "siliconflow");
+  assert.equal(models[0].is_free, false);
 }
 
 {
@@ -270,6 +296,22 @@ assert.deepEqual(mismatch.excluded[0].reasons, ["missing_capability:tools"]);
 const privacy = router.route({ candidates: [free], mode: "balanced", requirements: { sensitive: true } });
 assert.equal(privacy.selected, null);
 assert.equal(privacy.excluded[0].reasons[0], "privacy:zero_data_retention_not_explicitly_confirmed");
+
+const siliconFlowPolicy = router.route({
+  candidates: [siliconFlowUnknown],
+  mode: "balanced",
+  requirements: { policy_sensitive: true },
+});
+assert.equal(siliconFlowPolicy.selected, null);
+assert.equal(siliconFlowPolicy.excluded[0].reasons[0], "provider_policy:policy_sensitive_topics_disabled");
+
+const siliconFlowPrivacy = router.route({
+  candidates: [siliconFlowUnknown],
+  mode: "balanced",
+  requirements: { sensitive: true },
+});
+assert.equal(siliconFlowPrivacy.selected, null);
+assert.equal(siliconFlowPrivacy.excluded[0].reasons[0], "provider_policy:privacy_sensitive_tasks_disabled");
 
 const context = router.route({ candidates: [free], mode: "balanced", requirements: { min_context_length: 100_000 } });
 assert.equal(context.selected, null);
@@ -499,4 +541,4 @@ for (const status of [400, 401, 403, 404]) {
   assert.equal(persistent.runtimeState["openrouter:health-a"].updated_at, 123);
 }
 
-console.log("Budget-aware provider routing: registered OpenRouter, Groq, Gemini, OpenAI Responses, and generic OpenAI-compatible scenarios passed");
+console.log("Budget-aware provider routing: registered OpenRouter, Groq, Gemini, SiliconFlow, OpenAI Responses, and generic OpenAI-compatible scenarios passed");

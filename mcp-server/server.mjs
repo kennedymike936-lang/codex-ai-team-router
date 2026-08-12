@@ -117,6 +117,13 @@ function geminiConfig() {
   };
 }
 
+function siliconFlowConfig() {
+  return {
+    apiKey: readUserEnv("SILICONFLOW_API_KEY"),
+    baseUrl: process.env.SILICONFLOW_MCP_BASE_URL || "https://api.siliconflow.cn/v1",
+  };
+}
+
 function openAiCompatibleConfig() {
   return {
     apiKey: readUserEnv("OPENAI_COMPATIBLE_API_KEY"),
@@ -517,7 +524,7 @@ const tools = [
   },
   {
     name: "budget_route",
-    description: "Free-tier-aware, capability-aware routing across registered providers including OpenRouter, Groq, Gemini, and an administrator-configured OpenAI-compatible endpoint. dry_run defaults to true. Actual execution uses only configured provider keys and falls back only on quota, rate-limit, capacity, or 5xx responses.",
+    description: "Free-tier-aware, capability-aware routing across registered providers including OpenRouter, Groq, Gemini, SiliconFlow, and an administrator-configured OpenAI-compatible endpoint. dry_run defaults to true. Actual execution uses only configured provider keys and falls back only on quota, rate-limit, capacity, or 5xx responses.",
     inputSchema: {
       type: "object",
       properties: {
@@ -536,7 +543,7 @@ const tools = [
         mode: { type: "string", enum: ["free_only", "balanced", "quality_first"] },
         providers: {
           type: "array",
-          items: { type: "string", enum: ["openrouter", "groq", "gemini", "openai", "openai_compatible"] },
+          items: { type: "string", enum: ["openrouter", "groq", "gemini", "siliconflow", "openai", "openai_compatible"] },
         },
         requirements: {
           type: "object",
@@ -547,6 +554,7 @@ const tools = [
             },
             min_context_length: { type: "number" },
             sensitive: { type: "boolean" },
+            policy_sensitive: { type: "boolean" },
             require_zero_data_retention: { type: "boolean" },
           },
         },
@@ -653,12 +661,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const openrouter = openRouterConfig();
     const groq = groqConfig();
     const gemini = geminiConfig();
+    const siliconflow = siliconFlowConfig();
     const openaiCompatible = openAiCompatibleConfig();
     const openai = openAiResponsesConfig();
     const apiKeys = {
       openrouter: openrouter.apiKey,
       groq: groq.apiKey,
       gemini: gemini.apiKey,
+      siliconflow: siliconflow.apiKey,
       openai_compatible: openaiCompatible.apiKey,
       openai: openai.apiKey,
     };
@@ -666,6 +676,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       openrouter: openrouter.baseUrl,
       groq: groq.baseUrl,
       gemini: gemini.baseUrl,
+      siliconflow: siliconflow.baseUrl,
       openai_compatible: openaiCompatible.baseUrl,
       openai: openai.baseUrl,
     };

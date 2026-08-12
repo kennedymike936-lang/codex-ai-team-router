@@ -2,6 +2,7 @@ export const OPENROUTER_DEFAULT_BASE = "https://openrouter.ai/api/v1";
 export const GROQ_DEFAULT_BASE = "https://api.groq.com/openai/v1";
 export const GEMINI_DEFAULT_BASE = "https://generativelanguage.googleapis.com/v1beta";
 export const OPENAI_DEFAULT_BASE = "https://api.openai.com/v1";
+export const SILICONFLOW_DEFAULT_BASE = "https://api.siliconflow.cn/v1";
 
 function headerValue(headers, name) {
   if (!headers) return null;
@@ -26,7 +27,7 @@ export function redactKeys(text, secrets = []) {
   }
   return value
     .replace(/(authorization\s*:\s*bearer\s+|bearer\s+)[^\s,;"')\]}]+/gi, "$1***REDACTED***")
-    .replace(/\b(?:sk-or-|gsk_|AIza|AQ\.)[A-Za-z0-9._-]+\b/gi, "***REDACTED***");
+    .replace(/\b(?:sk-|gsk_|AIza|AQ\.)[A-Za-z0-9._-]+\b/gi, "***REDACTED***");
 }
 
 export function redactHeaders(headers) {
@@ -168,6 +169,20 @@ export function normalizeOpenAiCompatibleModel(raw, override = {}, _catalog = {}
   };
 }
 
+export function normalizeSiliconFlowModel(raw, override = {}) {
+  const model = normalizeOpenAiCompatibleModel(raw, override, {}, "siliconflow");
+  if (!model) return null;
+  return {
+    ...model,
+    // Requests cross the SiliconFlow cloud boundary even when the model ID
+    // names Qwen, DeepSeek, or another upstream model family.
+    data_boundary: "siliconflow_cloud",
+    privacy_sensitive_task_policy: "deny",
+    content_policy: "restricted",
+    is_zero_data_retention: override.is_zero_data_retention === true,
+  };
+}
+
 export function normalizeGeminiModel(raw, override = {}) {
   const name = typeof raw?.name === "string" ? raw.name.replace(/^models\//, "") : "";
   if (!name) return null;
@@ -229,6 +244,7 @@ function createOpenAiCompatibleAdapter({
   defaultBaseUrl = "",
   normalizeModel = (raw, override, catalog) => normalizeOpenAiCompatibleModel(raw, override, catalog, provider),
   safeFallbackStatuses = new Set([429]),
+  modelListPath = "/models",
   requiresApiKey = true,
   fetchImpl = fetch,
 } = {}) {
@@ -240,7 +256,7 @@ function createOpenAiCompatibleAdapter({
 
     async discoverModels({ baseUrl = defaultBaseUrl, apiKey, metadata = {}, capabilityCatalog = {} } = {}) {
       const root = requireBaseUrl(baseUrl, provider);
-      const response = await this.fetchImpl(`${root}/models`, { headers: bearerHeaders(apiKey) });
+      const response = await this.fetchImpl(`${root}${modelListPath}`, { headers: bearerHeaders(apiKey) });
       if (!response.ok) {
         const body = await response.text();
         throw new Error(redactKeys(`${provider} model discovery failed (${response.status}): ${body.slice(0, 300)}`, [apiKey]));
@@ -376,6 +392,17 @@ export function createGenericOpenAiAdapter(fetchImpl = fetch) {
   return createOpenAiCompatibleAdapter({ provider: "openai_compatible", requiresApiKey: false, fetchImpl });
 }
 
+export function createSiliconFlowAdapter(fetchImpl = fetch) {
+  return createOpenAiCompatibleAdapter({
+    provider: "siliconflow",
+    defaultBaseUrl: SILICONFLOW_DEFAULT_BASE,
+    normalizeModel: normalizeSiliconFlowModel,
+    modelListPath: "/models?type=text&sub_type=chat",
+    safeFallbackStatuses: new Set([429]),
+    fetchImpl,
+  });
+}
+
 export function normalizeOpenAiResponsesModel(raw, override = {}) {
   return normalizeOpenAiCompatibleModel(raw, override, {}, "openai");
 }
@@ -463,6 +490,7 @@ registerProvider("groq", createGroqAdapter);
 registerProvider("gemini", createGeminiAdapter);
 registerProvider("openai_compatible", createGenericOpenAiAdapter);
 registerProvider("openai", createOpenAiResponsesAdapter);
+registerProvider("siliconflow", createSiliconFlowAdapter);
 
 export function adapterForProvider(provider, fetchImpl) {
   const name = String(provider || "").trim().toLowerCase();

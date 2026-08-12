@@ -110,7 +110,7 @@ DEEPSEEK_MCP_MODEL = 'your-model-id'
 - `balanced`：综合能力、价格、上下文、延迟、健康状态和剩余限额。
 - `quality_first`：提高显式质量与能力元数据的权重，但仍执行预算、能力和隐私硬约束。
 
-默认 `dry_run=true`。预览结果包含所有候选、排除原因、分项得分、最终选择和备用链。只有显式设置 `dry_run=false` 才发送生成请求。OpenRouter、Groq 和通用 OpenAI-compatible 端点使用 Chat Completions；Gemini 使用原生 `generateContent`。路由仅对明确的额度/限流/容量错误和服务端 `5xx` 安全降级；`400`、`401`、`403` 及其他客户端错误立即停止。`Retry-After` 会记录在尝试结果中，但路由器不会自动休眠。
+默认 `dry_run=true`。预览结果包含所有候选、排除原因、分项得分、最终选择和备用链。只有显式设置 `dry_run=false` 才发送生成请求。OpenRouter、Groq、SiliconFlow 和通用 OpenAI-compatible 端点使用 Chat Completions；Gemini 使用原生 `generateContent`。路由仅对明确的额度/限流/容量错误和服务端 `5xx` 安全降级；`400`、`401`、`403` 及其他客户端错误立即停止。`Retry-After` 会记录在尝试结果中，但路由器不会自动休眠。
 
 能力和隐私采用保守策略：缺失的 `code`、`tools`、`web` 或零数据保留元数据不会被推断为支持。可用 `AI_TEAM_MODEL_METADATA_JSON` 为具体模型补充经过你核实的元数据，例如：
 
@@ -122,7 +122,9 @@ AI_TEAM_OPENROUTER_FREE_FALLBACK = 'false'
 
 `openrouter/free` 只在 `AI_TEAM_OPENROUTER_FREE_FALLBACK=true` 时加入 `free_only` 候选，并继续接受能力、上下文和隐私过滤。免费模型、价格和限额会变化，路由器不会写死额度数字或承诺可用性。
 
-v0.8 的 Provider Registry 将供应商与协议分离。内置注册项为 `openrouter`、`groq`、`gemini`、`openai` 和 `openai_compatible`。OpenAI 使用原生 Responses API；通用端点继续使用 Chat Completions，并允许无需 Key 的本地服务。Base URL 只能由维护者通过环境变量配置，`budget_route` 调用者不能传入任意 URL。Gemini 免费/未付费服务不会被标记为零数据保留；敏感任务会默认排除，除非管理员依据适用合同明确覆盖元数据。
+v0.8 的 Provider Registry 将供应商与协议分离。内置注册项为 `openrouter`、`groq`、`gemini`、`siliconflow`、`openai` 和 `openai_compatible`。OpenAI 使用原生 Responses API；通用端点继续使用 Chat Completions，并允许无需 Key 的本地服务。Base URL 只能由维护者通过环境变量配置，`budget_route` 调用者不能传入任意 URL。Gemini 免费/未付费服务不会被标记为零数据保留；隐私敏感任务会默认排除，除非管理员依据适用合同明确覆盖元数据。
+
+SiliconFlow 是独立的云端数据与内容政策边界，不会因为模型 ID 中含有 Qwen、DeepSeek 等名称而被当成模型厂商直连。它不在默认 Provider 列表中，必须在 `providers` 中显式选择。其价格、免费状态和能力不会从模型名称猜测；`free_only` 只接受管理员为具体模型核实并补充的零价格元数据。涉及凭证、私有代码、个人数据等内容时设置 `sensitive=true`；涉及受供应商或司法辖区内容规则约束的话题时设置 `policy_sensitive=true`，SiliconFlow 候选会以明确原因被排除。不要利用模型切换规避供应商政策或适用法律。
 
 ## 仓库结构
 
@@ -220,6 +222,7 @@ XAI_API_KEY
 OPENROUTER_API_KEY
 GROQ_API_KEY
 GEMINI_API_KEY
+SILICONFLOW_API_KEY
 OPENAI_COMPATIBLE_API_KEY
 OPENAI_API_KEY
 ```
@@ -233,6 +236,7 @@ Windows 用户级环境变量示例：
 [Environment]::SetEnvironmentVariable("OPENROUTER_API_KEY", "YOUR_KEY", "User")
 [Environment]::SetEnvironmentVariable("GROQ_API_KEY", "YOUR_KEY", "User")
 [Environment]::SetEnvironmentVariable("GEMINI_API_KEY", "YOUR_KEY", "User")
+[Environment]::SetEnvironmentVariable("SILICONFLOW_API_KEY", "YOUR_KEY", "User")
 ```
 
 设置后需要重启 Codex，使桌面进程重新读取环境变量。
@@ -256,6 +260,7 @@ XAI_MCP_BASE_URL = 'https://api.x.ai/v1'
 OPENROUTER_MCP_BASE_URL = 'https://openrouter.ai/api/v1'
 GROQ_MCP_BASE_URL = 'https://api.groq.com/openai/v1'
 GEMINI_MCP_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta'
+SILICONFLOW_MCP_BASE_URL = 'https://api.siliconflow.cn/v1'
 # Optional administrator-configured endpoint; never accept this URL from task input.
 OPENAI_COMPATIBLE_BASE_URL = 'http://127.0.0.1:1234/v1'
 ```

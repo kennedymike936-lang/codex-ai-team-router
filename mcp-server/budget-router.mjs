@@ -25,6 +25,7 @@ function normalizedRequirements(requirements = {}) {
     capabilities,
     min_context_length: Math.max(0, Number(requirements.min_context_length || 0)),
     sensitive: requirements.sensitive === true,
+    policy_sensitive: requirements.policy_sensitive === true,
     require_zero_data_retention: requirements.require_zero_data_retention === true,
   };
 }
@@ -39,8 +40,13 @@ export function meetsRequirements(model, requirements = {}) {
   if (normalized.min_context_length > 0 && Number(model.context_length || 0) < normalized.min_context_length) {
     reasons.push(`context_too_short:${Number(model.context_length || 0)}<${normalized.min_context_length}`);
   }
-  if ((normalized.sensitive || normalized.require_zero_data_retention) && model.is_zero_data_retention !== true) {
+  if (normalized.sensitive && model.privacy_sensitive_task_policy === "deny") {
+    reasons.push("provider_policy:privacy_sensitive_tasks_disabled");
+  } else if ((normalized.sensitive || normalized.require_zero_data_retention) && model.is_zero_data_retention !== true) {
     reasons.push("privacy:zero_data_retention_not_explicitly_confirmed");
+  }
+  if (normalized.policy_sensitive && model.content_policy === "restricted") {
+    reasons.push("provider_policy:policy_sensitive_topics_disabled");
   }
   return { passed: reasons.length === 0, reasons, requirements: normalized };
 }
@@ -97,6 +103,9 @@ function candidateSummary(model, score = null) {
     },
     is_free: model.is_free === true,
     is_zero_data_retention: model.is_zero_data_retention === true,
+    ...(model.privacy_sensitive_task_policy ? { privacy_sensitive_task_policy: model.privacy_sensitive_task_policy } : {}),
+    ...(model.content_policy ? { content_policy: model.content_policy } : {}),
+    ...(model.data_boundary ? { data_boundary: model.data_boundary } : {}),
     health: model.health || "unknown",
     latency_ms: Number.isFinite(model.latency_ms) ? model.latency_ms : null,
     quota_remaining: Number.isFinite(model.quota_remaining) ? model.quota_remaining : null,
@@ -145,12 +154,15 @@ function freeRouterCandidate() {
 function mergeMetadata(model, overrides = {}) {
   const override = overrides[`${model.provider}:${model.id}`] || overrides[model.id] || {};
   if (Object.keys(override).length === 0) return model;
-  return {
+  const merged = {
     ...model,
     ...override,
     capabilities: [...new Set([...(model.capabilities || []), ...(override.capabilities || [])])],
     pricing: { ...(model.pricing || {}), ...(override.pricing || {}) },
   };
+  if (model.privacy_sensitive_task_policy === "deny") merged.privacy_sensitive_task_policy = "deny";
+  if (model.content_policy === "restricted") merged.content_policy = "restricted";
+  return merged;
 }
 
 export function createBudgetRouter({
