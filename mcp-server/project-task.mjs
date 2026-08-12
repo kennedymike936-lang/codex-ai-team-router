@@ -128,9 +128,9 @@ export async function ensureGitBaseline(cwd, mode) {
   }
 }
 
-async function runScout({ task, cwd, worker, budget, maxWallTime, timeoutMs, maxTurns = 2, summaryMaxChars = 2400 }) {
+async function runScout({ task, cwd, worker, harness = "qwen", budget, maxWallTime, timeoutMs, maxTurns = 2, summaryMaxChars = 2400 }) {
   const scoutScript = await resolveScript("codex-scout.ps1");
-  const execution = await runPowerShell(scoutScript, [
+  const scriptArgs = [
     "-Task", String(task),
     "-Cwd", cwd,
     "-Worker", worker,
@@ -139,8 +139,11 @@ async function runScout({ task, cwd, worker, budget, maxWallTime, timeoutMs, max
     "-MaxSessionTurns", String(maxTurns),
     "-SummaryMaxChars", String(summaryMaxChars),
     "-JsonOnly",
-  ], timeoutMs);
-  return parseJsonOutput(execution.stdout, `${worker} scout worker`);
+  ];
+  if (worker === "deepseek") scriptArgs.push("-DeepSeekHarness", harness);
+  const execution = await runPowerShell(scoutScript, scriptArgs, timeoutMs);
+  const result = parseJsonOutput(execution.stdout, `${worker} scout worker`);
+  return { ...result, worker: result.worker || worker, harness: result.harness || harness };
 }
 
 export function compactPackMetadata(scoutPack) {
@@ -189,6 +192,7 @@ function combineInspectionResults(results) {
   const scoutPacks = usable.map((r) => r.scout_pack).filter(Boolean);
   return {
     status: successful.length > 0 ? "success" : "failed",
+    error: successful.length > 0 ? "" : usable.map((result) => result.error || result.summary).filter(Boolean).join("\n"),
     model: usable.map((result) => result.model).filter(Boolean).join(", "),
     summary: usable.map((result, index) => `## Scout ${index + 1}\n${result.summary || "No summary."}`).join("\n\n"),
     usage,
@@ -240,11 +244,12 @@ export function computeProjectDeadline({
   hasPlanner = false,
   runGate = true,
   initialAttempt = 1,
+  allowWorkerFailover = true,
   mcpTimeoutSeconds = MCP_TIMEOUT_SECONDS,
 } = {}) {
   const outerSeconds = Math.max(90, Number(mcpTimeoutSeconds) || 300);
   const safeTotalSeconds = Math.max(60, outerSeconds - 25);
-  const attemptCount = mode === "implement" && runGate && initialAttempt < 2 ? 2 : 1;
+  const attemptCount = initialAttempt < 2 && ((mode === "implement" && runGate) || allowWorkerFailover) ? 2 : 1;
   const gateSecondsEach = runGate ? 15 : 0;
   const overheadSeconds = 10;
   const plannerTimeoutSeconds = hasPlanner ? Math.min(45, Math.max(30, Math.floor(safeTotalSeconds * 0.16))) : 0;
@@ -293,6 +298,41 @@ export function shouldRunTargetedRetry(gate, attempt, finalAttempt = 2) {
   return gate?.decision === "retry" && attempt < finalAttempt;
 }
 
+const TERMINAL_WORKER_FAILURE = /\b(?:401|403|unauthori[sz]ed|forbidden|authentication|invalid (?:api|auth)[ _-]?key|(?:api|auth)[ _-]?key.*(?:missing|not configured)|permission denied|access denied)\b|(?:api|auth)[ _-]?key[^\n]*is not configured|allowed_paths? must|outside allowed|secret detected|forbidden path|invalid cwd|script not found/i;
+const TURN_LIMIT_FAILURE = /FatalTurnLimited|reached max(?:imum)? session turns|max session turns|session turn limit|turn limit(?:ed)?/i;
+const TIMEOUT_FAILURE = /ETIMEDOUT|timed? out|timeout|exceeded.*wall.?time/i;
+const TRANSIENT_WORKER_FAILURE = /\b(?:429|rate.?limit|500|502|503|504|service unavailable|bad gateway|gateway timeout|ECONNRESET|ECONNREFUSED|connection reset|temporary|capacity|overloaded)\b|structured output could not be parsed|did not return valid json|produced no result|process.*(?:failed|crash)|cli.*(?:failed|not found|not recognized)/i;
+
+export function classifyWorkerFailure(workerResult = {}) {
+  if (workerResult?.status === "success") return { kind: "none", retryable: false };
+  const text = [workerResult?.error, workerResult?.summary, workerResult?.message]
+    .filter(Boolean).join("\n");
+  if (TERMINAL_WORKER_FAILURE.test(text)) return { kind: "configuration_or_safety", retryable: false };
+  if (TURN_LIMIT_FAILURE.test(text)) return { kind: "turn_limit", retryable: true };
+  if (TIMEOUT_FAILURE.test(text)) return { kind: "timeout", retryable: true };
+  if (TRANSIENT_WORKER_FAILURE.test(text)) return { kind: "transient_or_harness", retryable: true };
+  return { kind: "worker_failure", retryable: true };
+}
+
+export function selectWorkerFailoverRoute(route = {}) {
+  const worker = route.worker === "qwen" ? "qwen" : "deepseek";
+  const harness = route.harness === "claude" ? "claude" : "qwen";
+  if (worker === "qwen" || harness === "qwen") {
+    return { worker: "deepseek", harness: "claude" };
+  }
+  return { worker: "qwen", harness: "qwen" };
+}
+
+export function buildWorkerFailoverTask(workerResult = {}, failure = {}, fromRoute = {}, toRoute = {}) {
+  return [
+    "Worker failover: this is attempt 2 of 2. Continue from the current workspace state.",
+    "Do not repeat broad discovery. Inspect only what is needed to finish or verify the prior partial work.",
+    `Previous route ${fromRoute.worker || "unknown"}/${fromRoute.harness || "unknown"} failed (${failure.kind || "worker_failure"}).`,
+    `Continue with ${toRoute.worker || "fallback"}/${toRoute.harness || "default"}; do not bypass authentication, permission, quota, or safety restrictions.`,
+    workerResult.summary ? `Previous attempt summary:\n${compact(workerResult.summary, 900)}` : "",
+  ].filter(Boolean).join("\n");
+}
+
 export function selectProjectMode(task = "", requested = "auto") {
   if (["inspect", "implement"].includes(requested)) return requested;
   return INSPECTION_WORDS.test(String(task)) ? "inspect" : "implement";
@@ -331,6 +371,7 @@ export function previewProjectTask(args = {}) {
     budget: args.budget || "low",
     approval: mode === "inspect" ? "auto" : "yolo",
     run_gate: mode === "implement" && args.run_gate !== false,
+    worker_failover: args.worker_failover !== false,
     max_minutes: Number(args.max_minutes) || (mode === "inspect" ? 5 : 8),
   };
 }
@@ -370,7 +411,9 @@ export async function runProjectTask(args = {}) {
   const taskId = String(args.task_id || `project-${Date.now()}-${randomUUID().slice(0, 8)}`);
   const maxMinutes = Math.max(1, Math.min(15, preview.max_minutes));
   const initialAttempt = Number(args.attempt) === 2 ? 2 : 1;
-  const finalAttempt = preview.run_gate !== false ? 2 : initialAttempt;
+  const finalAttempt = initialAttempt < 2 && (preview.run_gate !== false || preview.worker_failover)
+    ? 2
+    : initialAttempt;
   const hasPlanner = preview.mode === "implement" && preview.team.coding_assistants >= 2;
   const deadline = computeProjectDeadline({
     requestedMinutes: maxMinutes,
@@ -378,6 +421,7 @@ export async function runProjectTask(args = {}) {
     hasPlanner,
     runGate: preview.run_gate !== false,
     initialAttempt,
+    allowWorkerFailover: preview.worker_failover,
   });
   const gateTimeoutMs = Math.max(1, deadline.gate_timeout_seconds) * 1000;
   const allowedJson = JSON.stringify(allowedPaths);
@@ -393,18 +437,84 @@ export async function runProjectTask(args = {}) {
     const workers = preview.team.coding_assistants >= 2
       ? [preview.worker, preview.planner]
       : [preview.worker];
-    const settled = await Promise.allSettled(workers.map((worker) => runScout({
+    const initialRoutes = workers.map((worker) => ({ worker, harness: "qwen" }));
+    const settled = await Promise.allSettled(initialRoutes.map((route) => runScout({
       task: args.task,
       cwd,
-      worker,
+      worker: route.worker,
+      harness: route.harness,
       budget: preview.budget,
       maxWallTime: `${deadline.max_wall_time_seconds[0]}s`,
       timeoutMs: deadline.attempt_timeout_seconds[0] * 1000,
     })));
-    const results = settled.map((entry) => entry.status === "fulfilled"
+    const results = settled.map((entry, index) => entry.status === "fulfilled"
       ? entry.value
-      : { status: "failed", summary: compact(entry.reason?.message || entry.reason), changed_files: [] });
+      : {
+          status: "failed",
+          error: compact(entry.reason?.message || entry.reason),
+          summary: compact(entry.reason?.message || entry.reason),
+          changed_files: [],
+          ...initialRoutes[index],
+        });
+    workerResults.push(...results);
     workerResult = results.length === 1 ? results[0] : combineInspectionResults(results);
+    const firstFailure = classifyWorkerFailure(workerResult);
+    attempts.push({
+      attempt: initialAttempt,
+      worker: initialRoutes.map((route) => route.worker).join(","),
+      harness: initialRoutes.map((route) => route.harness).join(","),
+      worker_status: workerResult.status,
+      changed_files: [],
+      worker_run: workerResult.artifacts?.run_dir || null,
+      gate_decision: null,
+      gate_score: null,
+      failure_kind: firstFailure.kind,
+      turn_policy: selectTurnPolicy({ complexity: preview.complexity.level, attempt: initialAttempt }),
+    });
+
+    if (preview.worker_failover && firstFailure.retryable && initialAttempt < finalAttempt) {
+      const fromRoute = initialRoutes[0];
+      const fallbackRoute = selectWorkerFailoverRoute(fromRoute);
+      const fallbackTask = buildWorkerFailoverTask(workerResult, firstFailure, fromRoute, fallbackRoute);
+      let fallbackResult;
+      try {
+        fallbackResult = await runScout({
+          task: [String(args.task), fallbackTask].join("\n\n"),
+          cwd,
+          worker: fallbackRoute.worker,
+          harness: fallbackRoute.harness,
+          budget: preview.budget,
+          maxWallTime: `${deadline.max_wall_time_seconds[1]}s`,
+          timeoutMs: deadline.attempt_timeout_seconds[1] * 1000,
+          maxTurns: selectTurnPolicy({ complexity: preview.complexity.level, attempt: 2 }).max_session_turns,
+        });
+      } catch (error) {
+        fallbackResult = {
+          status: "failed",
+          error: compact(error?.message || error),
+          summary: compact(error?.message || error),
+          changed_files: [],
+          ...fallbackRoute,
+        };
+      }
+      workerResults.push(fallbackResult);
+      workerResult = fallbackResult.status === "success"
+        ? fallbackResult
+        : combineInspectionResults([...results, fallbackResult]);
+      const fallbackFailure = classifyWorkerFailure(fallbackResult);
+      attempts[0].failover_to = fallbackRoute;
+      attempts.push({
+        attempt: 2,
+        ...fallbackRoute,
+        worker_status: fallbackResult.status,
+        changed_files: [],
+        worker_run: fallbackResult.artifacts?.run_dir || null,
+        gate_decision: null,
+        gate_score: null,
+        failure_kind: fallbackFailure.kind,
+        turn_policy: selectTurnPolicy({ complexity: preview.complexity.level, attempt: 2 }),
+      });
+    }
   } else {
     if (preview.team.coding_assistants >= 2) {
       try {
@@ -436,6 +546,7 @@ export async function runProjectTask(args = {}) {
     const workerScript = await resolveScript("codex-worker.ps1");
     const gateScript = preview.run_gate ? await resolveScript("codex-gate.ps1") : null;
     let retryTask = "";
+    let currentRoute = { worker: preview.worker, harness: "qwen" };
 
     for (let attempt = initialAttempt; attempt <= finalAttempt; attempt += 1) {
       const attemptIndex = attempt - initialAttempt;
@@ -444,7 +555,7 @@ export async function runProjectTask(args = {}) {
       const turnPolicy = selectTurnPolicy({ complexity: preview.complexity.level, attempt });
       const workerTask = [baseWorkerTask, retryTask].filter(Boolean).join("\n\n");
       const workerArgs = [
-        "-Worker", preview.worker,
+        "-Worker", currentRoute.worker,
         "-Task", workerTask,
         "-Cwd", cwd,
         "-TaskId", taskId,
@@ -457,10 +568,47 @@ export async function runProjectTask(args = {}) {
         "-AllowedPathJson", allowedJson,
         "-JsonOnly",
       ];
-      const workerExecution = await runPowerShell(workerScript, workerArgs, attemptTimeoutSeconds * 1000);
-      workerResult = parseJsonOutput(workerExecution.stdout, "Project worker");
+      if (currentRoute.worker === "deepseek") workerArgs.push("-DeepSeekHarness", currentRoute.harness);
+      try {
+        const workerExecution = await runPowerShell(workerScript, workerArgs, attemptTimeoutSeconds * 1000);
+        workerResult = parseJsonOutput(workerExecution.stdout, "Project worker");
+        workerResult = {
+          ...workerResult,
+          worker: workerResult.worker || currentRoute.worker,
+          harness: workerResult.harness || currentRoute.harness,
+        };
+      } catch (error) {
+        workerResult = {
+          status: "failed",
+          error: compact(error?.message || error),
+          summary: compact(error?.message || error),
+          changed_files: [],
+          artifacts: {},
+          ...currentRoute,
+        };
+      }
       workerResults.push(workerResult);
       for (const file of workerResult.changed_files || []) changedFileSet.add(String(file));
+
+      const workerFailure = classifyWorkerFailure(workerResult);
+      if (preview.worker_failover && workerFailure.retryable && attempt < finalAttempt) {
+        const fallbackRoute = selectWorkerFailoverRoute(currentRoute);
+        attempts.push({
+          attempt,
+          ...currentRoute,
+          worker_status: workerResult.status,
+          changed_files: workerResult.changed_files || [],
+          worker_run: workerResult.artifacts?.run_dir || null,
+          gate_decision: null,
+          gate_score: null,
+          failure_kind: workerFailure.kind,
+          failover_to: fallbackRoute,
+          turn_policy: turnPolicy,
+        });
+        retryTask = buildWorkerFailoverTask(workerResult, workerFailure, currentRoute, fallbackRoute);
+        currentRoute = fallbackRoute;
+        continue;
+      }
 
       if (gateScript) {
         const gateArgs = [
@@ -480,11 +628,13 @@ export async function runProjectTask(args = {}) {
 
       attempts.push({
         attempt,
+        ...currentRoute,
         worker_status: workerResult.status,
         changed_files: workerResult.changed_files || [],
         worker_run: workerResult.artifacts?.run_dir || null,
         gate_decision: gate?.decision || null,
         gate_score: gate?.score ?? null,
+        failure_kind: workerFailure.kind,
         turn_policy: turnPolicy,
       });
       if (!shouldRunTargetedRetry(gate, attempt, finalAttempt)) break;
@@ -497,7 +647,7 @@ export async function runProjectTask(args = {}) {
     : (workerResult.changed_files || []);
   const combinedWorkerRuns = preview.mode === "implement"
     ? workerResults.map((result) => result.artifacts?.run_dir).filter(Boolean)
-    : (workerResult.team_runs || []);
+    : workerResults.map((result) => result.artifacts?.run_dir).filter(Boolean);
   const combinedModels = [...new Set(workerResults.map((result) => result.model).filter(Boolean))].join(", ");
   const finalSummary = attempts.length > 1
     ? `Completed ${attempts.length} worker attempts. Final attempt:\n${workerResult.summary || "No summary."}`
@@ -508,6 +658,12 @@ export async function runProjectTask(args = {}) {
     task_id: taskId,
     mode: preview.mode,
     route: preview.worker,
+    route_history: attempts.map((entry) => ({
+      attempt: entry.attempt,
+      worker: entry.worker,
+      harness: entry.harness,
+      failure_kind: entry.failure_kind,
+    })),
     planner: preview.planner,
     complexity: preview.complexity,
     turn_policy: {
@@ -518,7 +674,7 @@ export async function runProjectTask(args = {}) {
     team: {
       ...preview.team,
       actual_assistant_count: preview.mode === "inspect"
-        ? Math.max(1, workerResult.team_runs?.length || 0) + (args.research_context ? 1 : 0)
+        ? Math.max(1, workerResults.length) + (args.research_context ? 1 : 0)
         : 1 + (plannerResult?.status === "success" ? 1 : 0) + (args.research_context ? 1 : 0),
     },
     budget: preview.budget,
@@ -529,7 +685,7 @@ export async function runProjectTask(args = {}) {
     model: combinedModels || workerResult.model,
     summary: compact(finalSummary),
     usage: usageAvailability(
-      preview.mode === "implement" ? combineUsage(workerResults) : workerResult.usage,
+      combineUsage(workerResults),
       workerResult?.error || "CLI usage was not reported",
     ),
     scout_pack: preview.mode === "inspect" ? compactPackMetadata(workerResult.scout_pack) : null,

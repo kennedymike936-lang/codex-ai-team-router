@@ -536,7 +536,7 @@ const tools = [
   },
   {
     name: "project_task",
-    description: "Delegate one whole local project phase to an automatically sized AI team. Small work uses one coding assistant; broader work adds a read-only planner; complex time-sensitive work can also add Grok research. Implementation is noninteractive and can run the deterministic quality gate.",
+    description: "Delegate one whole local project phase to an automatically sized AI team. Small work uses one coding assistant; broader work adds a read-only planner; complex time-sensitive work can also add Grok research. Retryable worker failures can switch once to an independent assistant/harness. Implementation is noninteractive and can run the deterministic quality gate.",
     inputSchema: {
       type: "object",
       properties: {
@@ -555,6 +555,7 @@ const tools = [
         max_minutes: { type: "integer", minimum: 1, maximum: 15 },
         attempt: { type: "integer", minimum: 1, maximum: 2 },
         run_gate: { type: "boolean" },
+        worker_failover: { type: "boolean" },
         dry_run: { type: "boolean" },
       },
       required: ["task", "cwd"],

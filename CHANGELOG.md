@@ -4,6 +4,14 @@ All notable changes to this project will be documented here. The format follows 
 
 ## [Unreleased]
 
+### Added
+
+- One bounded assistant/harness failover for local `project_task` turn limits, timeouts, transient provider failures, process failures, and malformed structured output.
+
+### Security
+
+- Authentication, permission, API-key configuration, path-scope, and secret-policy failures stop immediately instead of switching assistants.
+
 ## [0.7.0] - 2026-08-11
 
 ### Added

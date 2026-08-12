@@ -660,6 +660,7 @@ $workerResult = [ordered]@{
   task = $Task
   attempt = $Attempt
   worker = $Worker
+  harness = $(if ($Worker -eq "deepseek") { $DeepSeekHarness } else { "qwen" })
   model = $selectedModel
   budget = $Budget
   status = $workerStatus

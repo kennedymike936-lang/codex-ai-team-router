@@ -68,6 +68,7 @@ flowchart LR
 - Gate 检查构建、测试、类型检查、lint、HTML 内联脚本语法、diff 大小、依赖变化和密钥痕迹。
 - 质量策略固定为：90 分以上接受、80～89 分只返工一次、低于 80 分由 Codex 接管。
 - `project_task` 在首次 Gate 返回 `retry` 时会在同一个 MCP 调用内自动执行一次定向返工，并合并两轮修改和用量；第二轮仍不合格才交给 Codex。
+- Scout/Worker 遇到轮次上限、超时、429/5xx、进程或结构化输出故障时，最多自动切换一次到独立助手/外壳；认证、权限、Key 配置和安全错误立即停止。
 - 构建/测试失败、密钥痕迹、越界修改等硬故障会跳过返工，立即要求 Codex 接管。
 - Worker 和 Gate 都生成 JSON 交接文件，Codex 接手时无需重新扫描整个项目。
 - 没有首次提交的 Git 仓库使用 `unborn` 基线，不再误判为非 Git 项目。
@@ -331,7 +332,7 @@ worker_gate_review
 }
 ```
 
-只读侦查时把 `mode` 设为 `inspect`。`max_assistants` 是费用上限，不是固定人数；自动调度只会使用必要的助手。实现模式默认使用非交互权限，非 Git 目录会先初始化本地 Git 基线；允许路径、Git diff、密钥扫描和项目检查由 Gate 兜底。首次 Gate 只要求返工时，`project_task` 会内部自动完成第二次定向尝试，无需 Codex 再发一次 MCP 请求。完整产物留在 `%USERPROFILE%\.codex-ai-team\runs`，MCP 只返回短摘要和路径。
+只读侦查时把 `mode` 设为 `inspect`。`max_assistants` 是费用上限，不是固定人数；自动调度只会使用必要的助手。`worker_failover` 默认开启：轮次上限、超时、429/5xx、进程或输出解析故障会最多切换一次（Qwen 外壳故障优先改走 `DeepSeek + Claude` 独立外壳），再失败则由 Codex 接管；认证、权限、Key 配置和安全错误不会切换。实现模式默认使用非交互权限，非 Git 目录会先初始化本地 Git 基线；允许路径、Git diff、密钥扫描和项目检查由 Gate 兜底。首次 Gate 只要求返工时，`project_task` 会内部自动完成第二次定向尝试，无需 Codex 再发一次 MCP 请求。完整产物留在 `%USERPROFILE%\.codex-ai-team\runs`，MCP 只返回短摘要和路径。
 
 确定性质量决策（不调用模型 API）：
 
