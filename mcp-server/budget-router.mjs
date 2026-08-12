@@ -184,13 +184,19 @@ export function createBudgetRouter({
       const discovered = [];
       const providerExclusions = [];
       for (const provider of [...new Set(providers)]) {
+        let adapter;
+        try {
+          adapter = adapterForProvider(provider, fetchImpl);
+        } catch (error) {
+          providerExclusions.push({ provider, reason: redactKeys(error.message || String(error), Object.values(apiKeys)) });
+          continue;
+        }
         const credential = apiKeys[provider];
-        if (!credential) {
+        if (adapter.requiresApiKey !== false && !credential) {
           providerExclusions.push({ provider, reason: "api_key_not_configured" });
           continue;
         }
         try {
-          const adapter = adapterForProvider(provider, fetchImpl);
           const models = await adapter.discoverModels({
             apiKey: credential,
             baseUrl: baseUrls[provider],
@@ -260,11 +266,11 @@ export function createBudgetRouter({
       const attempts = [];
       for (const entry of explanation.fallback_chain) {
         const credential = apiKeys[entry.provider];
-        if (!credential) {
+        const adapter = adapterForProvider(entry.provider, fetchImpl);
+        if (adapter.requiresApiKey !== false && !credential) {
           attempts.push({ model: entry.id, provider: entry.provider, success: false, stopped: true, error: "API key is not configured." });
           return { dry_run: false, explanation, result: null, attempts, error: `API key is not configured for ${entry.provider}.` };
         }
-        const adapter = adapterForProvider(entry.provider, fetchImpl);
         let response;
         try {
           ({ response } = await adapter.chatCompletion({
@@ -312,6 +318,7 @@ export function createBudgetRouter({
           return { dry_run: false, explanation, result: null, attempts, error };
         }
         const health = updateRuntimeState(entry, "success", headers);
+        const normalized = adapter.parseResponse(json);
         attempts.push({ model: entry.id, provider: entry.provider, success: true, status: 200, health });
         return {
           dry_run: false,
@@ -319,11 +326,11 @@ export function createBudgetRouter({
           result: {
             provider: entry.provider,
             model: entry.id,
-            content: json.choices?.[0]?.message?.content || "",
-            usage: {
-              input_tokens: json.usage?.prompt_tokens || json.usage?.input_tokens || 0,
-              output_tokens: json.usage?.completion_tokens || json.usage?.output_tokens || 0,
-            },
+            protocol: adapter.protocol,
+            content: normalized.content,
+            tool_calls: normalized.tool_calls,
+            finish_reason: normalized.finish_reason,
+            usage: normalized.usage,
           },
           attempts,
         };

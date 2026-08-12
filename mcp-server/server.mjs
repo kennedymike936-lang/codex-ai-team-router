@@ -110,6 +110,28 @@ function groqConfig() {
   };
 }
 
+function geminiConfig() {
+  return {
+    apiKey: readUserEnv("GEMINI_API_KEY") || readUserEnv("GOOGLE_API_KEY"),
+    baseUrl: process.env.GEMINI_MCP_BASE_URL || "https://generativelanguage.googleapis.com/v1beta",
+  };
+}
+
+function openAiCompatibleConfig() {
+  return {
+    apiKey: readUserEnv("OPENAI_COMPATIBLE_API_KEY"),
+    // Administrator-controlled only. Tool callers cannot supply arbitrary URLs.
+    baseUrl: process.env.OPENAI_COMPATIBLE_BASE_URL || "",
+  };
+}
+
+function openAiResponsesConfig() {
+  return {
+    apiKey: readUserEnv("OPENAI_API_KEY"),
+    baseUrl: process.env.OPENAI_MCP_BASE_URL || "https://api.openai.com/v1",
+  };
+}
+
 function budgetRouterMetadata() {
   const value = process.env.AI_TEAM_MODEL_METADATA_JSON;
   if (!value) return {};
@@ -495,7 +517,7 @@ const tools = [
   },
   {
     name: "budget_route",
-    description: "Free-tier-aware, capability-aware routing across OpenRouter and Groq. dry_run defaults to true: it may discover models but never sends a chat-completion request. Actual execution uses only configured provider keys and falls back only on quota, rate-limit, capacity, or 5xx responses.",
+    description: "Free-tier-aware, capability-aware routing across registered providers including OpenRouter, Groq, Gemini, and an administrator-configured OpenAI-compatible endpoint. dry_run defaults to true. Actual execution uses only configured provider keys and falls back only on quota, rate-limit, capacity, or 5xx responses.",
     inputSchema: {
       type: "object",
       properties: {
@@ -514,7 +536,7 @@ const tools = [
         mode: { type: "string", enum: ["free_only", "balanced", "quality_first"] },
         providers: {
           type: "array",
-          items: { type: "string", enum: ["openrouter", "groq"] },
+          items: { type: "string", enum: ["openrouter", "groq", "gemini", "openai", "openai_compatible"] },
         },
         requirements: {
           type: "object",
@@ -621,7 +643,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   if (name === "budget_route") {
     const dryRun = args.dry_run !== false;
     const mode = args.mode || "balanced";
-    const providers = args.providers || ["openrouter", "groq"];
+    const providers = args.providers || ["openrouter", "groq", "gemini"];
     const requirements = args.requirements || {};
     const maxTokens = args.max_tokens || 1024;
 
@@ -630,8 +652,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     const openrouter = openRouterConfig();
     const groq = groqConfig();
-    const apiKeys = { openrouter: openrouter.apiKey, groq: groq.apiKey };
-    const baseUrls = { openrouter: openrouter.baseUrl, groq: groq.baseUrl };
+    const gemini = geminiConfig();
+    const openaiCompatible = openAiCompatibleConfig();
+    const openai = openAiResponsesConfig();
+    const apiKeys = {
+      openrouter: openrouter.apiKey,
+      groq: groq.apiKey,
+      gemini: gemini.apiKey,
+      openai_compatible: openaiCompatible.apiKey,
+      openai: openai.apiKey,
+    };
+    const baseUrls = {
+      openrouter: openrouter.baseUrl,
+      groq: groq.baseUrl,
+      gemini: gemini.baseUrl,
+      openai_compatible: openaiCompatible.baseUrl,
+      openai: openai.baseUrl,
+    };
     const messages = args.messages || [{ role: "user", content: args.task }];
 
     const outcome = await budgetRouter.execute({

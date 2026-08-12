@@ -7,10 +7,13 @@ All notable changes to this project will be documented here. The format follows 
 ### Added
 
 - One bounded assistant/harness failover for local `project_task` turn limits, timeouts, transient provider failures, process failures, and malformed structured output.
+- Extensible Provider Registry with native Gemini REST, native OpenAI Responses, and administrator-configured generic OpenAI-compatible adapters.
+- Normalized provider protocol, text, tool calls, finish reason, and token usage in `budget_route` results.
 
 ### Security
 
 - Authentication, permission, API-key configuration, path-scope, and secret-policy failures stop immediately instead of switching assistants.
+- Gemini unpaid/free candidates are not treated as zero-data-retention, and provider Base URLs cannot be supplied by task input.
 
 ## [0.7.0] - 2026-08-11
 

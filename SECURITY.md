@@ -42,7 +42,7 @@ Provider credentials are read from environment variables and may be inherited by
 
 ### Network requests
 
-The router calls configured Qwen, DeepSeek, xAI, OpenRouter, and Groq-compatible endpoints. Configuration or dependency compromise could redirect traffic or send unintended context. Verify endpoints, review what is included in tasks, and do not send private repositories or account data without authorization. `budget_route` defaults to a dry run, stops on authentication and permission errors, and can require explicitly confirmed zero-data-retention metadata, but these controls do not replace reviewing provider terms and data policies.
+The router calls configured Qwen, DeepSeek, xAI, OpenRouter, Groq, Gemini, and optional OpenAI-compatible endpoints. Configuration or dependency compromise could redirect traffic or send unintended context. Provider Base URLs are administrator configuration and are never accepted from `budget_route` task input. Verify endpoints, review what is included in tasks, and do not send private repositories or account data without authorization. `budget_route` defaults to a dry run, stops on authentication and permission errors, and can require explicitly confirmed zero-data-retention metadata, but these controls do not replace reviewing provider terms and data policies.
 
 ### Logs and artifacts
 
