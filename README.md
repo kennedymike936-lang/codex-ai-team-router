@@ -69,6 +69,7 @@ flowchart LR
 - 质量策略固定为：90 分以上接受、80～89 分只返工一次、低于 80 分由 Codex 接管。
 - `project_task` 在首次 Gate 返回 `retry` 时会在同一个 MCP 调用内自动执行一次定向返工，并合并两轮修改和用量；第二轮仍不合格才交给 Codex。
 - Scout/Worker 遇到轮次上限、超时、429/5xx、进程或结构化输出故障时，最多自动切换一次到独立助手/外壳；认证、权限、Key 配置和安全错误立即停止。
+- 联网请求会区分 DNS、连接超时/拒绝、网络不可达、连接重置、TLS 和请求超时；安全可重放的失败最多重试一次，付费 POST 在送达状态不明时不会自动重放。
 - 构建/测试失败、密钥痕迹、越界修改等硬故障会跳过返工，立即要求 Codex 接管。
 - Worker 和 Gate 都生成 JSON 交接文件，Codex 接手时无需重新扫描整个项目。
 - 没有首次提交的 Git 仓库使用 `unborn` 基线，不再误判为非 Git 项目。
@@ -241,6 +242,19 @@ Windows 用户级环境变量示例：
 
 设置后需要重启 Codex，使桌面进程重新读取环境变量。
 
+### 可信代理与网络回退
+
+路由器不会扫描、下载或自动连接公网免费代理。只有维护者已经通过环境变量明确配置的 HTTP/HTTPS 代理才会被使用：
+
+```text
+AI_TEAM_TRUSTED_PROXY_URL   # 可选的专用代理；优先级最高
+HTTPS_PROXY / HTTP_PROXY   # 标准可信代理配置
+NO_PROXY                   # 绕过代理的主机；localhost/127.0.0.1/::1 始终加入
+AI_TEAM_PROXY_MODE         # fallback（默认）、always 或 off
+```
+
+`fallback` 先直连，只有 DNS、连接建立超时/拒绝或网络不可达等可安全判断的失败才尝试一次代理。`always` 从第一步就使用已配置代理；`off` 禁止代理。诊断结果只报告是否配置/尝试了代理，不输出代理 URL 或其中的凭证。TLS 错误不会通过关闭证书校验解决。Grok 网络失败会返回结构化 `network_unavailable` 结果，不再退化成无上下文的 MCP `fetch failed`。
+
 ## 接入 Codex
 
 打开 `~/.codex/config.toml`，参考 [examples/config.toml.example](examples/config.toml.example) 添加 MCP server。
@@ -257,6 +271,9 @@ startup_timeout_sec = 60
 QWEN_MCP_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
 DEEPSEEK_MCP_BASE_URL = 'https://api.deepseek.com/anthropic'
 XAI_MCP_BASE_URL = 'https://api.x.ai/v1'
+AI_TEAM_PROXY_MODE = 'fallback'
+# Optional trusted proxy only. Prefer a user/system environment variable when it contains credentials.
+# AI_TEAM_TRUSTED_PROXY_URL = 'http://127.0.0.1:7890'
 OPENROUTER_MCP_BASE_URL = 'https://openrouter.ai/api/v1'
 GROQ_MCP_BASE_URL = 'https://api.groq.com/openai/v1'
 GEMINI_MCP_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta'

@@ -10,12 +10,14 @@ All notable changes to this project will be documented here. The format follows 
 - Extensible Provider Registry with native Gemini REST, native OpenAI Responses, and administrator-configured generic OpenAI-compatible adapters.
 - Opt-in SiliconFlow adapter with conservative pricing, privacy, data-boundary, and content-policy metadata.
 - Normalized provider protocol, text, tool calls, finish reason, and token usage in `budget_route` results.
+- Structured network diagnostics, bounded safe retries, trusted HTTP/HTTPS proxy fallback, and assistant failover for pre-connect failures.
 
 ### Security
 
 - Authentication, permission, API-key configuration, path-scope, and secret-policy failures stop immediately instead of switching assistants.
 - Gemini unpaid/free candidates are not treated as zero-data-retention, and provider Base URLs cannot be supplied by task input.
 - SiliconFlow is excluded from privacy-sensitive and policy-sensitive tasks and is never inferred to be a direct connection to its hosted model vendor.
+- Public proxy discovery, TLS verification bypass, proxy credential disclosure, and uncertain paid-POST replay are explicitly prohibited.
 
 ## [0.7.0] - 2026-08-11
 

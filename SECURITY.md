@@ -44,6 +44,8 @@ Provider credentials are read from environment variables and may be inherited by
 
 The router calls configured Qwen, DeepSeek, xAI, OpenRouter, Groq, Gemini, SiliconFlow, and optional OpenAI-compatible endpoints. Configuration or dependency compromise could redirect traffic or send unintended context. Provider Base URLs are administrator configuration and are never accepted from `budget_route` task input. Verify endpoints, review what is included in tasks, and do not send private repositories or account data without authorization. A hosted model name does not change the provider that receives and processes the request. `budget_route` defaults to a dry run, stops on authentication and permission errors, and can require explicitly confirmed zero-data-retention metadata, but these controls do not replace reviewing provider terms, governing jurisdiction, and data policies.
 
+Proxy support is restricted to administrator-configured HTTP/HTTPS endpoints. The project does not discover or trust public proxies, does not expose proxy URLs or embedded credentials in diagnostics, keeps local loopback targets in `NO_PROXY`, and never disables TLS certificate validation. A proxy can read traffic metadata and, depending on its trust configuration, may become a content boundary; use only a proxy you control or explicitly trust. Paid POST requests are not replayed when a reset or timeout leaves delivery uncertain.
+
 ### Logs and artifacts
 
 Worker prompts, summaries, provider output, file paths, and command output may be stored under the local run directory. Automatic redaction is not guaranteed. Review artifacts before sharing them and delete sensitive local artifacts according to your own retention policy.
@@ -60,6 +62,7 @@ Worker prompts, summaries, provider output, file paths, and command output may b
 - Never place API keys, passwords, payment data, or private chats in tasks.
 - Mark confidential or personal-data tasks with `sensitive=true`, and tasks subject to provider/jurisdiction content restrictions with `policy_sensitive=true`.
 - Do not use fallback or model switching to evade provider policies or applicable law.
+- Do not configure unknown public proxies or disable TLS verification to make a provider request succeed.
 - Review diffs and Gate artifacts before accepting changes.
 - Treat failed scope or secret checks as hard failures.
 - Do not run target-project scripts you would not run manually.

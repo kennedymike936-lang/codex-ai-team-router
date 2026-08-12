@@ -12,6 +12,7 @@ import { planTaskTeam } from "./team-planner.mjs";
 import { recordUsage, usageEvent, usageSummary } from "./usage-ledger.mjs";
 import { xaiSearchClient } from "./xai-search.mjs";
 import { createBudgetRouter } from "./budget-router.mjs";
+import { isNetworkRequestError, resilientFetch } from "./network-client.mjs";
 
 const DEFAULT_CHECKLIST = [
   "code can run/build",
@@ -229,7 +230,7 @@ async function callQwen({ task, context, outputSchema, maxTokens, budget }) {
       max_tokens: maxTokens,
       stream: false,
     };
-    const response = await fetch(url, {
+    const response = await resilientFetch(url, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
       body: JSON.stringify(body),
@@ -301,7 +302,7 @@ async function callDeepSeek({ task, context, outputSchema, maxTokens, budget }) 
     };
     let unavailable = false;
     for (let headerIndex = 0; headerIndex < headerSets.length; headerIndex += 1) {
-      const response = await fetch(url, {
+      const response = await resilientFetch(url, {
         method: "POST", headers: headerSets[headerIndex], body: JSON.stringify(body),
       });
       const text = await response.text();
@@ -416,6 +417,22 @@ function formattedGrok(response, maxChars = 4500) {
   return `Model: ${response.event.model}\nUsage: ${usageSummary(response.event)}\nSearch calls: ${toolCount}\n\n${compactText(response.text, maxChars)}${sources}`;
 }
 
+function networkFailureResult(error, route = "grok") {
+  const diagnostic = error.diagnostic || {};
+  return {
+    status: "network_unavailable",
+    route,
+    retryable: diagnostic.transient === true && diagnostic.delivery_uncertain !== true,
+    fallback_recommended: true,
+    diagnostic,
+    message: error.message,
+  };
+}
+
+function safeAssistantFailover(error) {
+  return isNetworkRequestError(error) && error.diagnostic?.delivery_uncertain !== true;
+}
+
 async function delegate(args) {
   const preferred = args.preferred || "auto";
   const team = planTaskTeam({
@@ -440,21 +457,40 @@ async function delegate(args) {
   }
 
   if (route === "qwen") {
-    const qwen = await callQwen({ task, context, outputSchema, maxTokens, budget: args.budget || "low" });
-    return `${routingHeader}\n\n## Qwen\n${formattedWorker("Qwen", qwen)}`;
+    try {
+      const qwen = await callQwen({ task, context, outputSchema, maxTokens, budget: args.budget || "low" });
+      return `${routingHeader}\n\n## Qwen\n${formattedWorker("Qwen", qwen)}`;
+    } catch (error) {
+      if (!safeAssistantFailover(error)) throw error;
+      const deepseek = await callDeepSeek({ task, context, outputSchema, maxTokens, budget: args.budget || "low" });
+      return `${routingHeader}\nFailover: qwen -> deepseek (${error.diagnostic.category})\n\n## DeepSeek\n${formattedWorker("DeepSeek", deepseek)}`;
+    }
   }
   if (route === "deepseek") {
-    const deepseek = await callDeepSeek({ task, context, outputSchema, maxTokens, budget: args.budget || "low" });
-    return `${routingHeader}\n\n## DeepSeek\n${formattedWorker("DeepSeek", deepseek)}`;
+    try {
+      const deepseek = await callDeepSeek({ task, context, outputSchema, maxTokens, budget: args.budget || "low" });
+      return `${routingHeader}\n\n## DeepSeek\n${formattedWorker("DeepSeek", deepseek)}`;
+    } catch (error) {
+      if (!safeAssistantFailover(error)) throw error;
+      const qwen = await callQwen({ task, context, outputSchema, maxTokens, budget: args.budget || "low" });
+      return `${routingHeader}\nFailover: deepseek -> qwen (${error.diagnostic.category})\n\n## Qwen\n${formattedWorker("Qwen", qwen)}`;
+    }
   }
   if (route === "grok") {
     const source = searchSourceForText(`${task}\n${context}`);
-    const grok = await callGrokSearch({
-      query: [task, context ? `Context:\n${context}` : ""].filter(Boolean).join("\n\n"),
-      source,
-      budget: args.budget || "low",
-    });
-    return `${routingHeader}\n\n## Grok Search\n${formattedGrok(grok)}`;
+    try {
+      const grok = await callGrokSearch({
+        query: [task, context ? `Context:\n${context}` : ""].filter(Boolean).join("\n\n"),
+        source,
+        budget: args.budget || "low",
+      });
+      return `${routingHeader}\n\n## Grok Search\n${formattedGrok(grok)}`;
+    } catch (error) {
+      if (isNetworkRequestError(error)) {
+        return `${routingHeader}\n\n${JSON.stringify(networkFailureResult(error), null, 2)}`;
+      }
+      throw error;
+    }
   }
 
   if (route === "team") {
@@ -689,7 +725,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       providers,
       apiKeys,
       baseUrls,
-      fetchImpl: fetch,
+      fetchImpl: resilientFetch,
       messages,
       max_tokens: maxTokens,
       dry_run: dryRun,
@@ -701,15 +737,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   if (name === "grok_search") {
     const source = !args.source || args.source === "auto" ? searchSourceForText(args.query) : args.source;
     if (args.dry_run === true) return result(`Route: grok search (${source}); one server-side tool turn`);
-    const grok = await callGrokSearch({
-      query: args.query,
-      source,
-      allowedXHandles: args.allowed_x_handles || [],
-      fromDate: args.from_date || "",
-      toDate: args.to_date || "",
-      budget: args.budget || "low",
-    });
-    return result(`Route: grok\n\n## Grok Search\n${formattedGrok(grok)}`);
+    try {
+      const grok = await callGrokSearch({
+        query: args.query,
+        source,
+        allowedXHandles: args.allowed_x_handles || [],
+        fromDate: args.from_date || "",
+        toDate: args.to_date || "",
+        budget: args.budget || "low",
+      });
+      return result(`Route: grok\n\n## Grok Search\n${formattedGrok(grok)}`);
+    } catch (error) {
+      if (isNetworkRequestError(error)) return result(JSON.stringify(networkFailureResult(error), null, 2));
+      throw error;
+    }
   }
 
   if (name === "project_task") {
