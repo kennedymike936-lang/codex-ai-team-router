@@ -41,10 +41,11 @@ flowchart LR
 
 ## 为什么只保留一个 MCP
 
-为每个模型各加载一套 MCP，会让每个 Codex 会话携带更多工具定义。本项目只保留一个 MCP，并暴露四个紧凑工具：
+为每个模型各加载一套 MCP，会让每个 Codex 会话携带更多工具定义。本项目只保留一个 MCP，并暴露五个紧凑工具：
 
 - `delegate_task`：处理不需要本地文件工具的问答、草稿和分析；按任务复杂度自动选择一个或两个代码 Worker，复杂且依赖实时资料时再加入 Grok。
 - `grok_search`：一次只读 Web Search 或 X Search，`source=auto` 时一般实时资讯走 Web、帖子和舆论走 X；默认限制一个服务端工具回合。
+- `budget_route`：在用户主动配置的 OpenRouter / Groq Key 范围内，按能力、已知价格、隐私、延迟、健康状态和剩余限额解释并选择模型；默认只预览。
 - `project_task`：把一整段本地侦查或实现交给自动扩编的 Qwen/DeepSeek 团队；实现后可自动运行确定性 Gate，只把交接包返回 Codex。
 - `worker_gate_review`：对结构化结果做确定性质量决策，也兼容原有的 diff 轻量审查。
 
@@ -58,7 +59,7 @@ flowchart LR
 - Grok Search 默认 `max_turns=1`、关闭并行工具，只允许 X 或 Web 二选一，控制搜索调用费用。
 - 默认从服务商 `/models` 接口发现账号当前可用模型，并按代际与 `Flash / Plus / Pro` 档位自动选择。
 - 模型列表缓存一小时；新一代稳定别名上线后无需修改配置，模型不可用时同服务商最多回退一次。
-- `dry_run` 路由预览，不消耗模型 API。
+- `dry_run` 路由预览不发送生成请求；`budget_route` 仍可能读取服务商 `/models` 元数据。
 - 三档输出预算：`low`、`normal`、`deep`。
 - MCP 返回结果有字符上限，避免异常长回复进入 Codex 上下文。
 - Worker 完整输出写入磁盘，默认仅返回最多 30 行 / 3000 字符摘要。
@@ -67,6 +68,7 @@ flowchart LR
 - Gate 检查构建、测试、类型检查、lint、HTML 内联脚本语法、diff 大小、依赖变化和密钥痕迹。
 - 质量策略固定为：90 分以上接受、80～89 分只返工一次、低于 80 分由 Codex 接管。
 - `project_task` 在首次 Gate 返回 `retry` 时会在同一个 MCP 调用内自动执行一次定向返工，并合并两轮修改和用量；第二轮仍不合格才交给 Codex。
+- Scout/Worker 遇到轮次上限、超时、429/5xx、进程或结构化输出故障时，最多自动切换一次到独立助手/外壳；认证、权限、Key 配置和安全错误立即停止。
 - 构建/测试失败、密钥痕迹、越界修改等硬故障会跳过返工，立即要求 Codex 接管。
 - Worker 和 Gate 都生成 JSON 交接文件，Codex 接手时无需重新扫描整个项目。
 - 没有首次提交的 Git 仓库使用 `unborn` 基线，不再误判为非 Git 项目。
@@ -99,6 +101,26 @@ DEEPSEEK_MCP_MODEL = 'your-model-id'
 ```
 
 内置价格只用于估算，实际账单以服务商和地区为准。默认档位参考 [阿里云百炼模型价格](https://help.aliyun.com/zh/model-studio/model-pricing) 和 [DeepSeek 官方模型价格](https://api-docs.deepseek.com/zh-cn/quick_start/pricing)。
+
+## v0.7 预算感知路由
+
+`budget_route` 与原有 AI Team Worker 路由相互独立，不会改变 `delegate_task` 的行为。它支持：
+
+- `free_only`：只接受输入、输出价格都由模型元数据明确标为零的候选；Groq 的开发者限额不会被误判成零价格。
+- `balanced`：综合能力、价格、上下文、延迟、健康状态和剩余限额。
+- `quality_first`：提高显式质量与能力元数据的权重，但仍执行预算、能力和隐私硬约束。
+
+默认 `dry_run=true`。预览结果包含所有候选、排除原因、分项得分、最终选择和备用链。只有显式设置 `dry_run=false` 才发送 `/chat/completions` 请求。路由仅对 OpenRouter `402`、`429`、Groq `429`、`498` 和服务端 `5xx` 安全降级；`401`、`403` 及其他客户端错误立即停止。`Retry-After` 会记录在尝试结果中，但路由器不会自动休眠。
+
+能力和隐私采用保守策略：缺失的 `code`、`tools`、`web` 或零数据保留元数据不会被推断为支持。可用 `AI_TEAM_MODEL_METADATA_JSON` 为具体模型补充经过你核实的元数据，例如：
+
+```toml
+[mcp_servers.ai_team_mcp.env]
+AI_TEAM_MODEL_METADATA_JSON = '{"openrouter:vendor/model":{"capabilities":["code","tools"],"is_zero_data_retention":true,"quality_score":0.8}}'
+AI_TEAM_OPENROUTER_FREE_FALLBACK = 'false'
+```
+
+`openrouter/free` 只在 `AI_TEAM_OPENROUTER_FREE_FALLBACK=true` 时加入 `free_only` 候选，并继续接受能力、上下文和隐私过滤。免费模型、价格和限额会变化，路由器不会写死额度数字或承诺可用性。
 
 ## 仓库结构
 
@@ -190,12 +212,21 @@ Grok Search 读取：
 XAI_API_KEY
 ```
 
+预算感知路由按所选服务商读取：
+
+```text
+OPENROUTER_API_KEY
+GROQ_API_KEY
+```
+
 Windows 用户级环境变量示例：
 
 ```powershell
 [Environment]::SetEnvironmentVariable("DASHSCOPE_API_KEY", "YOUR_KEY", "User")
 [Environment]::SetEnvironmentVariable("ANTHROPIC_API_KEY", "YOUR_KEY", "User")
 [Environment]::SetEnvironmentVariable("XAI_API_KEY", "YOUR_KEY", "User")
+[Environment]::SetEnvironmentVariable("OPENROUTER_API_KEY", "YOUR_KEY", "User")
+[Environment]::SetEnvironmentVariable("GROQ_API_KEY", "YOUR_KEY", "User")
 ```
 
 设置后需要重启 Codex，使桌面进程重新读取环境变量。
@@ -216,6 +247,8 @@ startup_timeout_sec = 60
 QWEN_MCP_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
 DEEPSEEK_MCP_BASE_URL = 'https://api.deepseek.com/anthropic'
 XAI_MCP_BASE_URL = 'https://api.x.ai/v1'
+OPENROUTER_MCP_BASE_URL = 'https://openrouter.ai/api/v1'
+GROQ_MCP_BASE_URL = 'https://api.groq.com/openai/v1'
 ```
 
 不填写模型名即使用自动模式。
@@ -231,6 +264,7 @@ XAI_MCP_BASE_URL = 'https://api.x.ai/v1'
 ```text
 delegate_task
 grok_search
+budget_route
 project_task
 worker_gate_review
 ```
@@ -267,6 +301,22 @@ worker_gate_review
 }
 ```
 
+预览预算感知路由（会读取模型列表，但不发送任务内容给生成接口）：
+
+```json
+{
+  "task": "检查这段代码的并发问题",
+  "mode": "balanced",
+  "providers": ["openrouter", "groq"],
+  "requirements": {
+    "capabilities": ["code", "tools"],
+    "min_context_length": 32000,
+    "sensitive": false
+  },
+  "dry_run": true
+}
+```
+
 把一整段本地实现交给副手并自动验收：
 
 ```json
@@ -282,7 +332,7 @@ worker_gate_review
 }
 ```
 
-只读侦查时把 `mode` 设为 `inspect`。`max_assistants` 是费用上限，不是固定人数；自动调度只会使用必要的助手。实现模式默认使用非交互权限，非 Git 目录会先初始化本地 Git 基线；允许路径、Git diff、密钥扫描和项目检查由 Gate 兜底。首次 Gate 只要求返工时，`project_task` 会内部自动完成第二次定向尝试，无需 Codex 再发一次 MCP 请求。完整产物留在 `%USERPROFILE%\.codex-ai-team\runs`，MCP 只返回短摘要和路径。
+只读侦查时把 `mode` 设为 `inspect`。`max_assistants` 是费用上限，不是固定人数；自动调度只会使用必要的助手。`worker_failover` 默认开启：轮次上限、超时、429/5xx、进程或输出解析故障会最多切换一次（Qwen 外壳故障优先改走 `DeepSeek + Claude` 独立外壳），再失败则由 Codex 接管；认证、权限、Key 配置和安全错误不会切换。实现模式默认使用非交互权限，非 Git 目录会先初始化本地 Git 基线；允许路径、Git diff、密钥扫描和项目检查由 Gate 兜底。首次 Gate 只要求返工时，`project_task` 会内部自动完成第二次定向尝试，无需 Codex 再发一次 MCP 请求。完整产物留在 `%USERPROFILE%\.codex-ai-team\runs`，MCP 只返回短摘要和路径。
 
 确定性质量决策（不调用模型 API）：
 
@@ -494,6 +544,8 @@ npm run probe:xai
 
 - 本项目不会把 API key 写入源代码。
 - MCP 和脚本会读取用户环境变量中的 key。
+- `budget_route` 不接受 Key 参数；它只读取 `OPENROUTER_API_KEY` / `GROQ_API_KEY` 环境变量，并对已知凭证值和 Bearer 片段做错误脱敏。
+- 敏感任务默认应设置 `sensitive=true` 或 `require_zero_data_retention=true`；没有显式零数据保留元数据的候选会被排除。
 - Worker 能运行工具并修改工作区，运行前应确认目标目录正确。
 - 完整 worker 日志可能包含任务中出现的敏感信息，**项目不会自动保证日志脱敏**。
 - 不要把 `.env`、私钥、支付数据、账号凭据或私人聊天内容交给外部模型。

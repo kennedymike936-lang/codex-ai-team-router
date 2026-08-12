@@ -8,5 +8,13 @@ startup_timeout_sec = 60
 QWEN_MCP_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
 DEEPSEEK_MCP_BASE_URL = 'https://api.deepseek.com/anthropic'
 XAI_MCP_BASE_URL = 'https://api.x.ai/v1'
+OPENROUTER_MCP_BASE_URL = 'https://openrouter.ai/api/v1'
+GROQ_MCP_BASE_URL = 'https://api.groq.com/openai/v1'
+# Provider keys stay in user/system environment variables; never paste them here.
+# OPENROUTER_API_KEY and GROQ_API_KEY enable budget_route for those providers.
+# Free-model availability and limits change. This opt-in is false unless set to true.
+AI_TEAM_OPENROUTER_FREE_FALLBACK = 'false'
+# Optional verified metadata. Missing capabilities/privacy are intentionally not inferred.
+AI_TEAM_MODEL_METADATA_JSON = '{"openrouter:vendor/model":{"capabilities":["code","tools"],"is_zero_data_retention":true,"quality_score":0.8}}'
 # AI_TEAM_MODEL_MODE defaults to 'auto'. Set it to 'fixed' only when you
 # intentionally want QWEN_MCP_MODEL / DEEPSEEK_MCP_MODEL / XAI_SEARCH_MODEL pinned.

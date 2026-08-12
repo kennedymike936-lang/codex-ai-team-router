@@ -8,6 +8,9 @@ param(
   [ValidateSet("auto", "qwen", "deepseek")]
   [string]$Worker = "auto",
 
+  [ValidateSet("qwen", "claude")]
+  [string]$DeepSeekHarness = "qwen",
+
   [string]$MaxWallTime = "5m",
 
   [ValidateRange(2, 8)]
@@ -170,6 +173,9 @@ $workerArgs = @{
   MaxSessionTurns = $MaxSessionTurns
   SummaryLines = $SummaryLines
   SummaryMaxChars = $SummaryMaxChars
+}
+if ($Worker -eq "deepseek") {
+  $workerArgs.DeepSeekHarness = $DeepSeekHarness
 }
 if ($JsonOnly) {
   $workerArgs.JsonOnly = $true

@@ -10,7 +10,7 @@ The project is designed for Windows-based maintainer workflows. It combines mode
 
 ## What it provides
 
-- One MCP server with four tools: `delegate_task`, `grok_search`, `project_task`, and `worker_gate_review`.
+- One MCP server with five tools: `delegate_task`, `grok_search`, `budget_route`, `project_task`, and `worker_gate_review`.
 - Automatic routing between Qwen and DeepSeek based on task type and complexity.
 - Optional read-only Web/X research through Grok Search.
 - Staged multi-agent work: read-only planning, one writing worker, then deterministic validation.
@@ -18,6 +18,7 @@ The project is designed for Windows-based maintainer workflows. It combines mode
 - Build, test, type-check, lint, diff-size, scope, and secret-pattern checks where supported by the target project.
 - Compact MCP responses with full worker artifacts stored locally.
 - Local token and cost ledgers based on provider-reported usage when available.
+- Explainable, budget-aware OpenRouter and Groq selection with conservative capability and privacy filtering.
 - An isolated eight-task benchmark with hidden acceptance checks.
 
 ## Requirements
@@ -60,9 +61,13 @@ startup_timeout_sec = 60
 QWEN_MCP_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
 DEEPSEEK_MCP_BASE_URL = 'https://api.deepseek.com/anthropic'
 XAI_MCP_BASE_URL = 'https://api.x.ai/v1'
+OPENROUTER_MCP_BASE_URL = 'https://openrouter.ai/api/v1'
+GROQ_MCP_BASE_URL = 'https://api.groq.com/openai/v1'
 ```
 
 Provider keys are read from environment variables. Do not put keys in the repository, prompts, or Codex configuration examples.
+
+`budget_route` reads `OPENROUTER_API_KEY` and `GROQ_API_KEY`. It defaults to `dry_run=true`; a preview may call `/models`, but it never sends a chat-completion request. Set `AI_TEAM_OPENROUTER_FREE_FALLBACK=true` only if you intentionally want `openrouter/free` considered in `free_only` mode. Verified per-model capability, privacy, latency, or quality metadata can be supplied as JSON through `AI_TEAM_MODEL_METADATA_JSON`; see the example config.
 
 ## Example
 
@@ -80,6 +85,24 @@ Delegate a bounded implementation and run the Gate:
 ```
 
 Use `mode: "inspect"` for read-only investigation. `max_assistants` is a cost cap, not a requested team size.
+
+Preview budget-aware routing:
+
+```json
+{
+  "task": "Review this code for concurrency bugs",
+  "mode": "balanced",
+  "providers": ["openrouter", "groq"],
+  "requirements": {
+    "capabilities": ["code", "tools"],
+    "min_context_length": 32000,
+    "sensitive": false
+  },
+  "dry_run": true
+}
+```
+
+The modes are `free_only`, `balanced`, and `quality_first`. `free_only` requires explicit zero input and output prices; a Groq developer allowance is not treated as zero price. Missing capability or zero-retention metadata is never inferred. Actual execution falls back only on OpenRouter `402`/`429`, Groq `429`/`498`, or server `5xx`; authentication, permission, and other client errors stop the chain. Provider prices, free-model availability, and limits remain changeable external data.
 
 ## Validation policy
 
@@ -112,6 +135,8 @@ That result is a repository-specific sample, not a universal success-rate or tok
 Workers may read and modify files, execute commands, inherit provider credentials, make outbound requests, run target-project scripts, and store task material in local logs. Repository content processed by an agent can also contain prompt-injection instructions.
 
 Use the narrowest practical `cwd` and `allowed_paths`, work in a recoverable Git checkout, review diffs, and never provide secrets or private account data to a worker. See [SECURITY.md](SECURITY.md) for the threat model and reporting process.
+
+For sensitive `budget_route` work, set `sensitive=true` or `require_zero_data_retention=true`. Candidates without explicitly confirmed zero-data-retention metadata are excluded. This is a routing guardrail, not a legal or privacy guarantee; verify provider terms yourself.
 
 ## Current limitations
 

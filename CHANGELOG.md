@@ -6,6 +6,19 @@ All notable changes to this project will be documented here. The format follows 
 
 ### Added
 
+- One bounded assistant/harness failover for local `project_task` turn limits, timeouts, transient provider failures, process failures, and malformed structured output.
+
+### Security
+
+- Authentication, permission, API-key configuration, path-scope, and secret-policy failures stop immediately instead of switching assistants.
+
+## [0.7.0] - 2026-08-11
+
+### Added
+
+- `budget_route` with `free_only`, `balanced`, and `quality_first` policies for OpenRouter and Groq.
+- Unified provider adapters, explainable candidate scoring, conservative capability/privacy filters, and opt-in `openrouter/free` routing.
+- Offline coverage for model metadata, 200, 402, 429, 498, 5xx, authentication stops, capability/privacy mismatches, rate-limit headers, and credential redaction.
 - English project entrypoint.
 - Security policy and threat model.
 - Contribution guide, issue forms, and pull request template.
@@ -13,6 +26,8 @@ All notable changes to this project will be documented here. The format follows 
 
 ### Changed
 
+- Package and MCP server version advanced to 0.7.0 without claiming a GitHub Release or package publication.
+- Fallback is limited to documented quota, rate-limit, temporary-capacity, and server failures; authentication, permission, and other client errors stop routing.
 - Installer uses the lockfile-based clean install path when available.
 - Package metadata now documents the supported Node.js version and repository links.
 - MCP SDK and transitive dependencies use versions that pass the current production dependency audit.
@@ -28,5 +43,6 @@ All notable changes to this project will be documented here. The format follows 
 
 This changelog records the version already declared in `mcp-server/package.json`; it does not claim that a GitHub Release or package publication occurred on this date.
 
-[Unreleased]: https://github.com/kennedymike936-lang/codex-ai-team-router/compare/caf8a06...HEAD
+[Unreleased]: https://github.com/kennedymike936-lang/codex-ai-team-router/compare/e9b6c29...HEAD
+[0.7.0]: https://github.com/kennedymike936-lang/codex-ai-team-router/compare/e9b6c29...HEAD
 [0.6.0]: https://github.com/kennedymike936-lang/codex-ai-team-router/tree/caf8a06

@@ -1,7 +1,7 @@
 {
   "name": "codex-ai-team-router",
-  "version": "0.6.0",
-  "description": "Codex-led Qwen and DeepSeek AI team router via MCP, with bounded workers and deterministic safety gates.",
+  "version": "0.7.0",
+  "description": "Codex-led AI team and budget-aware model router via MCP, with bounded workers and deterministic safety gates.",
   "type": "module",
   "private": true,
   "main": "server.mjs",
@@ -25,6 +25,6 @@
     "smoke": "node smoke-test.mjs",
     "probe:live": "node live-model-probe.mjs",
     "probe:xai": "node xai-mcp-live-probe.mjs",
-    "test": "node quality-policy-test.mjs && node model-selector-test.mjs && node xai-search-test.mjs && node --test project-task-test.mjs mechanical-inspector-test.mjs turn-policy-test.mjs && node smoke-test.mjs && powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/codex-worker-test.ps1 && powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/codex-scout-pack-test.ps1 && powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/ai-team-evolve-test.ps1 && powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/codex-gate-test.ps1"
+    "test": "node quality-policy-test.mjs && node model-selector-test.mjs && node xai-search-test.mjs && node budget-router-test.mjs && node --test project-task-test.mjs mechanical-inspector-test.mjs turn-policy-test.mjs && node smoke-test.mjs && powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/codex-worker-test.ps1 && powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/codex-scout-pack-test.ps1 && powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/ai-team-evolve-test.ps1 && powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/codex-gate-test.ps1"
   }
 }

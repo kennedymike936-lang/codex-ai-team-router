@@ -5,6 +5,8 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   buildTargetedRetryTask,
+  buildWorkerFailoverTask,
+  classifyWorkerFailure,
   combineScoutPacks,
   computeProjectDeadline,
   compactPackMetadata,
@@ -14,6 +16,7 @@ import {
   runProjectTask,
   selectProjectMode,
   selectProjectWorker,
+  selectWorkerFailoverRoute,
   shouldRunTargetedRetry,
   usageAvailability,
 } from "./project-task.mjs";
@@ -69,6 +72,29 @@ test("allows exactly one targeted internal retry", () => {
   assert.doesNotMatch(task, /lint/);
 });
 
+test("classifies retryable helper failures without bypassing configuration errors", () => {
+  assert.deepEqual(
+    classifyWorkerFailure({ status: "failed", error: "FatalTurnLimitedError: Reached max session turns" }),
+    { kind: "turn_limit", retryable: true },
+  );
+  assert.deepEqual(
+    classifyWorkerFailure({ status: "failed", error: "401 Unauthorized: API key is not configured" }),
+    { kind: "configuration_or_safety", retryable: false },
+  );
+  assert.deepEqual(selectWorkerFailoverRoute({ worker: "qwen", harness: "qwen" }), {
+    worker: "deepseek", harness: "claude",
+  });
+  const task = buildWorkerFailoverTask(
+    { summary: "partial inspection" },
+    { kind: "turn_limit" },
+    { worker: "qwen", harness: "qwen" },
+    { worker: "deepseek", harness: "claude" },
+  );
+  assert.match(task, /attempt 2 of 2/i);
+  assert.match(task, /do not repeat broad discovery/i);
+  assert.match(task, /deepseek\/claude/i);
+});
+
 test("reserves the MCP deadline across planner, retries, and gates", () => {
   const deadline = computeProjectDeadline({
     requestedMinutes: 12,
@@ -95,7 +121,7 @@ test("keeps focused scouts cheap and marks unavailable usage explicitly", () => 
     mcpTimeoutSeconds: 300,
   });
   assert.equal(deadline.planner_max_turns, 0);
-  assert.equal(deadline.attempt_count, 1);
+  assert.equal(deadline.attempt_count, 2);
   const unavailable = usageAvailability(null, "FatalTurnLimitedError before result event");
   assert.equal(unavailable.availability, "unavailable");
   assert.match(unavailable.reason, /FatalTurnLimitedError/);
@@ -242,6 +268,61 @@ $score = $(if ($Attempt -eq 1) { 85 } else { 95 })
     assert.equal(result.turn_policy.planner_max_session_turns, 0);
     assert.deepEqual(result.changed_files, ["out.txt"]);
     assert.equal(result.usage.total_tokens, 24);
+    assert.equal(result.artifacts.team_runs.length, 2);
+  } finally {
+    if (previousScriptRoot === undefined) delete process.env.AI_TEAM_SCRIPT_ROOT;
+    else process.env.AI_TEAM_SCRIPT_ROOT = previousScriptRoot;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("project_task switches once from a turn-limited Qwen scout to an independent DeepSeek harness", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ai-team-failover-"));
+  const cwd = join(root, "workspace");
+  const scripts = join(root, "scripts");
+  const previousScriptRoot = process.env.AI_TEAM_SCRIPT_ROOT;
+  await mkdir(cwd);
+  await mkdir(scripts);
+  const scoutScript = String.raw`param(
+  [string]$Task, [string]$Cwd, [string]$Worker, [string]$DeepSeekHarness,
+  [string]$Budget, [string]$MaxWallTime, [int]$MaxSessionTurns,
+  [int]$SummaryMaxChars, [switch]$JsonOnly
+)
+$failed = $Worker -eq "qwen"
+[ordered]@{
+  status = $(if ($failed) { "failed" } else { "success" })
+  worker = $Worker
+  harness = $(if ($Worker -eq "deepseek") { $DeepSeekHarness } else { "qwen" })
+  model = "fake-$Worker"
+  error = $(if ($failed) { "FatalTurnLimitedError: Reached max session turns" } else { "" })
+  summary = $(if ($failed) { "Reached max session turns" } else { "fallback inspection complete" })
+  usage = [ordered]@{ input_tokens = 4; output_tokens = 2; total_tokens = 6; num_turns = 1 }
+  changed_files = @()
+  scout_pack = [ordered]@{ enabled = $false; reason = "fixture"; char_count = 0; max_chars = 1000; truncated = $false; file_count = 0; match_count = 0; elapsed_ms = 0; wrapper_elapsed_ms = 1 }
+  artifacts = [ordered]@{ run_dir = "fake-$Worker-$DeepSeekHarness"; worker_result = ""; full_result = "" }
+} | ConvertTo-Json -Depth 5 -Compress
+`;
+
+  try {
+    await writeFile(join(scripts, "codex-scout.ps1"), scoutScript, "utf8");
+    process.env.AI_TEAM_SCRIPT_ROOT = scripts;
+    const result = await runProjectTask({
+      cwd,
+      task: "Inspect the helper recovery path",
+      mode: "inspect",
+      preferred: "qwen",
+      max_assistants: 1,
+      max_minutes: 1,
+      research_context: "fixture: bypass mechanical inspection",
+    });
+    assert.equal(result.status, "success");
+    assert.equal(result.attempts.length, 2);
+    assert.deepEqual(result.route_history, [
+      { attempt: 1, worker: "qwen", harness: "qwen", failure_kind: "turn_limit" },
+      { attempt: 2, worker: "deepseek", harness: "claude", failure_kind: "none" },
+    ]);
+    assert.deepEqual(result.attempts[0].failover_to, { worker: "deepseek", harness: "claude" });
+    assert.match(result.summary, /fallback inspection complete/);
     assert.equal(result.artifacts.team_runs.length, 2);
   } finally {
     if (previousScriptRoot === undefined) delete process.env.AI_TEAM_SCRIPT_ROOT;
