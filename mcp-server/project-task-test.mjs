@@ -354,3 +354,59 @@ $failed = $Worker -eq "qwen"
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("project_task recovers a structured partial handoff from a nonzero PowerShell exit", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ai-team-nonzero-handoff-"));
+  const cwd = join(root, "workspace");
+  const scripts = join(root, "scripts");
+  const previousScriptRoot = process.env.AI_TEAM_SCRIPT_ROOT;
+  await mkdir(cwd);
+  await mkdir(scripts);
+  const workerScript = String.raw`param(
+  [string]$Worker, [string]$Task, [string]$Cwd, [string]$TaskId, [int]$Attempt,
+  [string]$Approval, [string]$Budget, [string]$MaxWallTime, [int]$MaxSessionTurns,
+  [int]$SummaryMaxChars, [string]$AllowedPathJson, [string]$DeepSeekHarness, [switch]$JsonOnly
+)
+$partial = Join-Path $Cwd "partial.txt"
+if ($Attempt -eq 1) { "useful" | Set-Content -LiteralPath $partial -Encoding UTF8 }
+[ordered]@{
+  status = $(if ($Attempt -eq 1) { "failed" } else { "success" })
+  worker = $Worker
+  harness = $(if ($Worker -eq "deepseek") { $DeepSeekHarness } else { "qwen" })
+  model = "fake-$Worker"
+  error = $(if ($Attempt -eq 1) { "wall-clock timeout with partial output" } else { "" })
+  summary = $(if ($Attempt -eq 1) { "timed out after preserving partial.txt" } else { "fallback preserved and completed partial.txt" })
+  usage = [ordered]@{ input_tokens = 10; output_tokens = 2; total_tokens = 12; num_turns = 1 }
+  changed_files = @("partial.txt")
+  allowed_paths = @("partial.txt")
+  artifacts = [ordered]@{ run_dir = "fake-$Attempt"; worker_result = "fake-worker-result.json"; full_result = "fake-result.txt" }
+} | ConvertTo-Json -Depth 5 -Compress
+if ($Attempt -eq 1) { exit 55 }
+`;
+
+  try {
+    await writeFile(join(scripts, "codex-worker.ps1"), workerScript, "utf8");
+    process.env.AI_TEAM_SCRIPT_ROOT = scripts;
+    const result = await runProjectTask({
+      cwd,
+      task: "Implement the bounded timeout recovery fixture",
+      mode: "implement",
+      preferred: "qwen",
+      max_assistants: 1,
+      max_minutes: 1,
+      allowed_paths: ["partial.txt"],
+      run_gate: false,
+    });
+    assert.equal(result.status, "success");
+    assert.equal(result.attempts.length, 2);
+    assert.equal(result.attempts[0].failure_kind, "timeout");
+    assert.deepEqual(result.attempts[0].failover_to, { worker: "deepseek", harness: "claude" });
+    assert.deepEqual(result.changed_files, ["partial.txt"]);
+    assert.equal(result.usage.total_tokens, 24);
+    assert.equal(result.artifacts.team_runs.length, 2);
+  } finally {
+    if (previousScriptRoot === undefined) delete process.env.AI_TEAM_SCRIPT_ROOT;
+    else process.env.AI_TEAM_SCRIPT_ROOT = previousScriptRoot;
+    await rm(root, { recursive: true, force: true });
+  }
+});

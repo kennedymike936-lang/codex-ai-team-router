@@ -72,6 +72,24 @@ async function runPowerShell(script, scriptArgs, timeoutMs) {
       { encoding: "utf8", windowsHide: true, timeout: timeoutMs, maxBuffer: 1024 * 1024 },
     );
   } catch (error) {
+    // Worker scripts deliberately return a structured JSON handoff even when
+    // the underlying model CLI exits non-zero (for example after a wall-clock
+    // timeout with useful partial files). Windows PowerShell can propagate the
+    // native CLI's LASTEXITCODE after printing that JSON. Preserve the handoff
+    // so project_task can classify the real failure and perform bounded
+    // failover instead of discarding changed files and usage accounting.
+    const stdout = String(error?.stdout || "");
+    if (stdout.trim()) {
+      try {
+        parseJsonOutput(stdout, "PowerShell structured handoff");
+        return {
+          stdout,
+          stderr: String(error?.stderr || ""),
+          recovered_nonzero_exit: true,
+          exit_code: Number(error?.code) || null,
+        };
+      } catch {}
+    }
     const details = compact([error?.message, error?.stdout, error?.stderr].filter(Boolean).join("\n"), 1800);
     throw new Error(`Local project worker failed: ${details}`);
   }

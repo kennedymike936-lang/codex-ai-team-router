@@ -41,11 +41,12 @@ flowchart LR
 
 ## 为什么只保留一个 MCP
 
-为每个模型各加载一套 MCP，会让每个 Codex 会话携带更多工具定义。本项目只保留一个 MCP，并暴露五个紧凑工具：
+为每个模型各加载一套 MCP，会让每个 Codex 会话携带更多工具定义。本项目只保留一个 MCP，并暴露六个紧凑工具：
 
 - `delegate_task`：处理不需要本地文件工具的问答、草稿和分析；按任务复杂度自动选择一个或两个代码 Worker，复杂且依赖实时资料时再加入 Grok。
 - `grok_search`：一次只读 Web Search 或 X Search，`source=auto` 时一般实时资讯走 Web、帖子和舆论走 X；默认限制一个服务端工具回合。
 - `budget_route`：在用户主动配置的 OpenRouter、Groq、Gemini、OpenAI Responses 或管理员配置的 OpenAI-compatible 服务范围内，按能力、已知价格、隐私、延迟、健康状态和剩余限额解释并选择模型；默认只预览。
+- `doctor`：只读检查 Node、PowerShell、Git、Qwen/Claude 外壳、各 Provider 凭证是否存在以及可信代理是否配置；只返回布尔状态和安全建议，不读取或返回密钥、代理 URL 与凭证，也不发起模型调用。
 - `project_task`：把一整段本地侦查或实现交给自动扩编的 Qwen/DeepSeek 团队；实现后可自动运行确定性 Gate，只把交接包返回 Codex。
 - `worker_gate_review`：对结构化结果做确定性质量决策，也兼容原有的 diff 轻量审查。
 
@@ -72,6 +73,7 @@ flowchart LR
 - 联网请求会区分 DNS、连接超时/拒绝、网络不可达、连接重置、TLS 和请求超时；安全可重放的失败最多重试一次，付费 POST 在送达状态不明时不会自动重放。
 - 构建/测试失败、密钥痕迹、越界修改等硬故障会跳过返工，立即要求 Codex 接管。
 - Worker 和 Gate 都生成 JSON 交接文件，Codex 接手时无需重新扫描整个项目。
+- 即使底层模型因墙钟超时以非零状态结束，`project_task` 也会回收结构化交接，保留已修改文件、真实失败类型和精确用量后再决定接力。
 - 没有首次提交的 Git 仓库使用 `unborn` 基线，不再误判为非 Git 项目。
 - API key 只从环境变量读取，不写入代码或 Codex 配置示例。
 - Router 基于 Node.js；本地 worker 脚本面向 Windows PowerShell。
@@ -294,6 +296,7 @@ OPENAI_COMPATIBLE_BASE_URL = 'http://127.0.0.1:1234/v1'
 
 ```text
 delegate_task
+doctor
 grok_search
 budget_route
 project_task

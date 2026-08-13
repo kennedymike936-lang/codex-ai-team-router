@@ -13,6 +13,7 @@ import { recordUsage, usageEvent, usageSummary } from "./usage-ledger.mjs";
 import { xaiSearchClient } from "./xai-search.mjs";
 import { createBudgetRouter } from "./budget-router.mjs";
 import { isNetworkRequestError, resilientFetch } from "./network-client.mjs";
+import { runDoctor } from "./doctor.mjs";
 
 const DEFAULT_CHECKLIST = [
   "code can run/build",
@@ -667,6 +668,15 @@ const tools = [
       },
     },
   },
+  {
+    name: "doctor",
+    description: "Read-only diagnostic of local AI Team configuration and tool availability. Reports Node, PowerShell, Git, Qwen and Claude/DeepSeek harness command availability, per-provider configuration (presence only, never values), and trusted HTTP/HTTPS proxy presence. Never makes paid model calls, never writes to environment/registry/system, and never changes proxies. Public proxy discovery and TLS verification bypass are forbidden.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+  },
 ];
 
 const server = new Server(
@@ -732,6 +742,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     });
 
     return result(JSON.stringify(outcome, null, 2));
+  }
+
+  if (name === "doctor") {
+    return result(JSON.stringify(runDoctor(), null, 2));
   }
 
   if (name === "grok_search") {

@@ -11,10 +11,16 @@ const transport = new StdioClientTransport({
 await client.connect(transport);
 const listed = await client.listTools();
 const names = listed.tools.map((tool) => tool.name).sort();
-const expected = ["delegate_task", "grok_search", "project_task", "worker_gate_review"];
+const expected = ["delegate_task", "doctor", "grok_search", "project_task", "worker_gate_review"];
 
 for (const name of expected) {
   if (!names.includes(name)) throw new Error(`Missing MCP tool: ${name}`);
+}
+
+const doctorCall = await client.callTool({ name: "doctor", arguments: {} });
+const doctor = JSON.parse(doctorCall.content?.[0]?.text || "{}");
+if (!doctor.summary || !Array.isArray(doctor.providers) || !doctor.proxy || !Array.isArray(doctor.notes)) {
+  throw new Error(`Unexpected doctor result shape: ${JSON.stringify(doctor)}`);
 }
 
 const preview = await client.callTool({

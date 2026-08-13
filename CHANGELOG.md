@@ -12,11 +12,13 @@ All notable changes to this project will be documented here. The format follows 
 - Normalized provider protocol, text, tool calls, finish reason, and token usage in `budget_route` results.
 - Structured network diagnostics, bounded safe retries, trusted HTTP/HTTPS proxy fallback, and assistant failover for pre-connect failures.
 - Exact run-local Qwen request accounting, including cached versus uncached input, thinking tokens, provider API time, and per-request breakdowns after partial or timed-out runs.
+- Read-only `doctor` diagnostics for local runtimes, AI harness commands, provider credential presence, and trusted proxy presence without exposing credential or proxy values.
 
 ### Changed
 
 - Large-output workers receive an explicit wall-clock stop policy, a longer primary completion window, and a narrower focused fallback window.
 - Worker failover preserves completed partial files and identifies remaining scope from the allowed paths and current workspace diff.
+- `project_task` recovers structured partial handoffs from nonzero PowerShell exits so timed-out workers retain changed files, exact usage, and the correct failover classification.
 
 ### Fixed
 
