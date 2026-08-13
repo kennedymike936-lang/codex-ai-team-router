@@ -81,11 +81,19 @@ test("classifies retryable helper failures without bypassing configuration error
     classifyWorkerFailure({ status: "failed", error: "401 Unauthorized: API key is not configured" }),
     { kind: "configuration_or_safety", retryable: false },
   );
+  assert.deepEqual(
+    classifyWorkerFailure({ status: "failed", error: "Warning: no stdin data received in 3s" }),
+    { kind: "harness_stdin", retryable: true },
+  );
   assert.deepEqual(selectWorkerFailoverRoute({ worker: "qwen", harness: "qwen" }), {
     worker: "deepseek", harness: "claude",
   });
   const task = buildWorkerFailoverTask(
-    { summary: "partial inspection" },
+    {
+      summary: "partial inspection",
+      changed_files: ["locales/one.reds"],
+      allowed_paths: ["locales/one.reds", "locales/two.reds"],
+    },
     { kind: "turn_limit" },
     { worker: "qwen", harness: "qwen" },
     { worker: "deepseek", harness: "claude" },
@@ -93,6 +101,8 @@ test("classifies retryable helper failures without bypassing configuration error
   assert.match(task, /attempt 2 of 2/i);
   assert.match(task, /do not repeat broad discovery/i);
   assert.match(task, /deepseek\/claude/i);
+  assert.match(task, /locales\/one\.reds/);
+  assert.match(task, /compar(?:e|ing).*current workspace diff/i);
 });
 
 test("reserves the MCP deadline across planner, retries, and gates", () => {
@@ -110,6 +120,20 @@ test("reserves the MCP deadline across planner, retries, and gates", () => {
   assert.ok(deadline.allocated_seconds <= deadline.safe_total_seconds);
   assert.ok(deadline.safe_total_seconds < deadline.outer_timeout_seconds);
   assert.ok(deadline.attempt_timeout_seconds[0] > deadline.attempt_timeout_seconds[1]);
+  assert.ok(deadline.attempt_timeout_seconds[1] <= 45);
+});
+
+test("gives the first large worker enough time to finish one provider response", () => {
+  const deadline = computeProjectDeadline({
+    requestedMinutes: 12,
+    mode: "implement",
+    hasPlanner: false,
+    runGate: true,
+    initialAttempt: 1,
+    mcpTimeoutSeconds: 300,
+  });
+  assert.deepEqual(deadline.attempt_timeout_seconds, [190, 45]);
+  assert.deepEqual(deadline.max_wall_time_seconds, [182, 37]);
 });
 
 test("keeps focused scouts cheap and marks unavailable usage explicitly", () => {

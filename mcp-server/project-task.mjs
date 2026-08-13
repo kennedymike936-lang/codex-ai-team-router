@@ -205,7 +205,10 @@ function combineInspectionResults(results) {
 }
 
 function combineUsage(results = []) {
-  const keys = ["input_tokens", "output_tokens", "cache_read_tokens", "total_tokens", "num_turns"];
+  const keys = [
+    "input_tokens", "output_tokens", "cache_read_tokens", "uncached_input_tokens",
+    "thinking_tokens", "total_tokens", "num_turns", "request_count", "provider_duration_ms",
+  ];
   let anyUnavailable = false;
   const usage = results.reduce((sum, result) => {
     const u = result?.usage;
@@ -259,7 +262,7 @@ export function computeProjectDeadline({
   );
   const requestedSeconds = Math.max(30, Math.floor(Number(requestedMinutes) * 60));
   const retryTimeoutSeconds = attemptCount === 2
-    ? Math.min(60, Math.max(30, Math.floor(workerPoolSeconds * 0.28)))
+    ? Math.min(45, Math.max(30, Math.floor(workerPoolSeconds * 0.20)))
     : 0;
   const firstTimeoutSeconds = Math.min(requestedSeconds + 8, workerPoolSeconds - retryTimeoutSeconds);
   const attemptTimeoutSeconds = attemptCount === 2
@@ -301,6 +304,7 @@ export function shouldRunTargetedRetry(gate, attempt, finalAttempt = 2) {
 const TERMINAL_WORKER_FAILURE = /\b(?:401|403|unauthori[sz]ed|forbidden|authentication|invalid (?:api|auth)[ _-]?key|(?:api|auth)[ _-]?key.*(?:missing|not configured)|permission denied|access denied)\b|(?:api|auth)[ _-]?key[^\n]*is not configured|allowed_paths? must|outside allowed|secret detected|forbidden path|invalid cwd|script not found/i;
 const TURN_LIMIT_FAILURE = /FatalTurnLimited|reached max(?:imum)? session turns|max session turns|session turn limit|turn limit(?:ed)?/i;
 const TIMEOUT_FAILURE = /ETIMEDOUT|timed? out|timeout|exceeded.*wall.?time/i;
+const HARNESS_STDIN_FAILURE = /no stdin data received|stdin.*(?:not received|initiali[sz]|closed|unavailable)/i;
 const TRANSIENT_WORKER_FAILURE = /\b(?:429|rate.?limit|500|502|503|504|service unavailable|bad gateway|gateway timeout|ECONNRESET|ECONNREFUSED|connection reset|temporary|capacity|overloaded)\b|structured output could not be parsed|did not return valid json|produced no result|process.*(?:failed|crash)|cli.*(?:failed|not found|not recognized)/i;
 
 export function classifyWorkerFailure(workerResult = {}) {
@@ -310,6 +314,7 @@ export function classifyWorkerFailure(workerResult = {}) {
   if (TERMINAL_WORKER_FAILURE.test(text)) return { kind: "configuration_or_safety", retryable: false };
   if (TURN_LIMIT_FAILURE.test(text)) return { kind: "turn_limit", retryable: true };
   if (TIMEOUT_FAILURE.test(text)) return { kind: "timeout", retryable: true };
+  if (HARNESS_STDIN_FAILURE.test(text)) return { kind: "harness_stdin", retryable: true };
   if (TRANSIENT_WORKER_FAILURE.test(text)) return { kind: "transient_or_harness", retryable: true };
   return { kind: "worker_failure", retryable: true };
 }
@@ -324,12 +329,16 @@ export function selectWorkerFailoverRoute(route = {}) {
 }
 
 export function buildWorkerFailoverTask(workerResult = {}, failure = {}, fromRoute = {}, toRoute = {}) {
+  const changedFiles = (workerResult.changed_files || []).map(String).filter(Boolean);
+  const allowedPaths = (workerResult.allowed_paths || []).map(String).filter(Boolean);
   return [
     "Worker failover: this is attempt 2 of 2. Continue from the current workspace state.",
     "Do not repeat broad discovery. Inspect only what is needed to finish or verify the prior partial work.",
     `Previous route ${fromRoute.worker || "unknown"}/${fromRoute.harness || "unknown"} failed (${failure.kind || "worker_failure"}).`,
     `Continue with ${toRoute.worker || "fallback"}/${toRoute.harness || "default"}; do not bypass authentication, permission, quota, or safety restrictions.`,
-    workerResult.summary ? `Previous attempt summary:\n${compact(workerResult.summary, 900)}` : "",
+    changedFiles.length > 0 ? `Useful partial files already changed: ${changedFiles.join(", ")}. Preserve them unless focused validation proves they are wrong.` : "",
+    allowedPaths.length > 0 ? `Original allowed paths: ${allowedPaths.join(", ")}. Determine the remaining scope by comparing these paths with the current workspace diff.` : "",
+    workerResult.summary ? `Previous attempt summary:\n${compact(workerResult.summary, changedFiles.length > 0 ? 450 : 900)}` : "",
   ].filter(Boolean).join("\n");
 }
 

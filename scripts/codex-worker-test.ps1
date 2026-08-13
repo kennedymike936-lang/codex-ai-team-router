@@ -6,14 +6,15 @@ $worker = Join-Path $PSScriptRoot "codex-worker.ps1"
 $fixture = Join-Path ([IO.Path]::GetTempPath()) "ai-team-worker-usage-$([guid]::NewGuid().ToString('N'))"
 
 function Invoke-UsageParser {
-  param([string]$Json, [string]$ErrorText = "")
+  param([string]$Json, [string]$ErrorText = "", [string]$ProviderLedger = "")
   $jsonPath = Join-Path $fixture "events.json"
   $errorPath = Join-Path $fixture "stderr.txt"
   $textPath = Join-Path $fixture "result.txt"
   $Json | Set-Content -LiteralPath $jsonPath -Encoding UTF8
   $ErrorText | Set-Content -LiteralPath $errorPath -Encoding UTF8
   $raw = & $worker -Worker qwen -Task "usage parser fixture" -UsageParseOnly `
-    -UsageParseJsonPath $jsonPath -UsageParseErrorPath $errorPath -UsageParseTextPath $textPath -JsonOnly
+    -UsageParseJsonPath $jsonPath -UsageParseErrorPath $errorPath -UsageParseProviderLedgerPath $ProviderLedger `
+    -UsageParseTextPath $textPath -JsonOnly
   return (($raw -join "`n") | ConvertFrom-Json)
 }
 
@@ -57,7 +58,20 @@ try {
   }
   Write-Host "Fixture 4 (FatalTurnLimitedError, no events): passed"
 
-  Write-Host "Worker usage parser: 4 fixtures passed"
+  # Fixture 5 - the run-local provider ledger is authoritative and exposes
+  # cache-adjusted input, thinking tokens, request count, and API duration.
+  $providerLedger = Join-Path $fixture "token-usage.jsonl"
+  @'
+{"model":"qwen3.7-plus","inputTokens":100,"outputTokens":10,"cachedTokens":60,"thoughtsTokens":3,"totalTokens":110,"apiDurationMs":700}
+{"model":"qwen3.7-plus","inputTokens":140,"outputTokens":20,"cachedTokens":100,"thoughtsTokens":5,"totalTokens":160,"apiDurationMs":900}
+'@ | Set-Content -LiteralPath $providerLedger -Encoding UTF8
+  $ledgerRecovered = Invoke-UsageParser -Json "" -ErrorText '{"error":{"type":"FatalTurnLimitedError"}}' -ProviderLedger $providerLedger
+  if ($ledgerRecovered.availability -ne "recovered" -or $ledgerRecovered.input_tokens -ne 240 -or $ledgerRecovered.cache_read_tokens -ne 160 -or $ledgerRecovered.uncached_input_tokens -ne 80 -or $ledgerRecovered.thinking_tokens -ne 8 -or $ledgerRecovered.request_count -ne 2 -or $ledgerRecovered.provider_duration_ms -ne 1600 -or $ledgerRecovered.requests.Count -ne 2) {
+    throw "Provider ledger fixture: expected exact summed and per-request usage."
+  }
+  Write-Host "Fixture 5 (provider ledger recovery): passed"
+
+  Write-Host "Worker usage parser: 5 fixtures passed"
 
   # Source-level safe-mode assertions (line-based to avoid nested-paren issues)
   $sourcePath = Join-Path $PSScriptRoot "codex-worker.ps1"
@@ -69,6 +83,12 @@ try {
   $sourceText = $sourceLines -join "`n"
   foreach ($requiredGuidance in @("hard work budget", "one-third of the turns", "Reserve the final 2 turns", "do not create plans or todos")) {
     if (-not $sourceText.Contains($requiredGuidance)) { throw "Missing turn-budget guidance: $requiredGuidance" }
+  }
+  foreach ($requiredReliabilityText in @("Do not start another large generated file", "complete and validate one allowed file", '"--input-format", "text"', "ReadAllText(`$promptPath) | & claude")) {
+    if (-not $sourceText.Contains($requiredReliabilityText)) { throw "Missing worker reliability behavior: $requiredReliabilityText" }
+  }
+  if ($sourceText -match '(?s)\$claudeArgs\s*=\s*@\(.*?\$workerPrompt.*?\)') {
+    throw "Claude args must not carry the full worker prompt as a positional argument."
   }
 
   function Test-ArgArrayHasFlag {

@@ -11,6 +11,17 @@ All notable changes to this project will be documented here. The format follows 
 - Opt-in SiliconFlow adapter with conservative pricing, privacy, data-boundary, and content-policy metadata.
 - Normalized provider protocol, text, tool calls, finish reason, and token usage in `budget_route` results.
 - Structured network diagnostics, bounded safe retries, trusted HTTP/HTTPS proxy fallback, and assistant failover for pre-connect failures.
+- Exact run-local Qwen request accounting, including cached versus uncached input, thinking tokens, provider API time, and per-request breakdowns after partial or timed-out runs.
+
+### Changed
+
+- Large-output workers receive an explicit wall-clock stop policy, a longer primary completion window, and a narrower focused fallback window.
+- Worker failover preserves completed partial files and identifies remaining scope from the allowed paths and current workspace diff.
+
+### Fixed
+
+- DeepSeek's Claude-compatible harness now receives the worker task through explicit text stdin instead of a long positional argument, preventing the Windows three-second stdin initialization failure.
+- Isolated Qwen workers now create their own minimal settings file and use a stable prompt file, avoiding inherited configuration noise and command-line truncation.
 
 ### Security
 

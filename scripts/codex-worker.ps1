@@ -54,6 +54,8 @@ param(
 
   [string]$UsageParseErrorPath = "",
 
+  [string]$UsageParseProviderLedgerPath = "",
+
   [string]$UsageParseTextPath = ""
 )
 
@@ -171,10 +173,58 @@ function Resolve-ValueModel {
   return $candidates[0]
 }
 
+function Read-QwenProviderUsage {
+  param([string]$LedgerPath)
+
+  if ([string]::IsNullOrWhiteSpace($LedgerPath) -or -not (Test-Path -LiteralPath $LedgerPath)) {
+    return $null
+  }
+  $files = @()
+  if ((Get-Item -LiteralPath $LedgerPath).PSIsContainer) {
+    $files = @(Get-ChildItem -LiteralPath $LedgerPath -Recurse -File -Filter "token-usage-*.jsonl")
+  } else {
+    $files = @((Get-Item -LiteralPath $LedgerPath))
+  }
+  $requests = @()
+  foreach ($file in $files) {
+    foreach ($line in @(Get-Content -LiteralPath $file.FullName -Encoding UTF8)) {
+      if ([string]::IsNullOrWhiteSpace($line)) { continue }
+      try { $event = $line | ConvertFrom-Json } catch { continue }
+      if ($null -eq $event.inputTokens -and $null -eq $event.outputTokens) { continue }
+      $inputTokens = [long]$(if ($null -ne $event.inputTokens) { $event.inputTokens } else { 0 })
+      $cachedTokens = [long]$(if ($null -ne $event.cachedTokens) { $event.cachedTokens } else { 0 })
+      $requests += [pscustomobject]@{
+        model = [string]$event.model
+        input_tokens = $inputTokens
+        output_tokens = [long]$(if ($null -ne $event.outputTokens) { $event.outputTokens } else { 0 })
+        cache_read_tokens = $cachedTokens
+        uncached_input_tokens = [long][math]::Max(0, $inputTokens - $cachedTokens)
+        thinking_tokens = [long]$(if ($null -ne $event.thoughtsTokens) { $event.thoughtsTokens } else { 0 })
+        total_tokens = [long]$(if ($null -ne $event.totalTokens) { $event.totalTokens } else { 0 })
+        provider_duration_ms = [long]$(if ($null -ne $event.apiDurationMs) { $event.apiDurationMs } else { 0 })
+      }
+    }
+  }
+  if ($requests.Count -eq 0) { return $null }
+
+  return [pscustomobject]@{
+    input_tokens = [long](($requests.input_tokens | Measure-Object -Sum).Sum)
+    output_tokens = [long](($requests.output_tokens | Measure-Object -Sum).Sum)
+    cache_read_tokens = [long](($requests.cache_read_tokens | Measure-Object -Sum).Sum)
+    uncached_input_tokens = [long](($requests.uncached_input_tokens | Measure-Object -Sum).Sum)
+    thinking_tokens = [long](($requests.thinking_tokens | Measure-Object -Sum).Sum)
+    total_tokens = [long](($requests.total_tokens | Measure-Object -Sum).Sum)
+    provider_duration_ms = [long](($requests.provider_duration_ms | Measure-Object -Sum).Sum)
+    request_count = [int]$requests.Count
+    requests = @($requests)
+  }
+}
+
 function Convert-QwenJsonOutput {
   param(
     [string]$JsonPath,
     [string]$ErrorPath,
+    [string]$ProviderLedgerPath = "",
     [string]$TextPath
   )
 
@@ -207,7 +257,10 @@ function Convert-QwenJsonOutput {
   $outputValues = @($usageEvents | ForEach-Object { if ($null -ne $_.usage.output_tokens) { [long]$_.usage.output_tokens } })
   $cacheValues = @($usageEvents | ForEach-Object { if ($null -ne $_.usage.cache_read_input_tokens) { [long]$_.usage.cache_read_input_tokens } elseif ($null -ne $_.usage.cache_read_tokens) { [long]$_.usage.cache_read_tokens } })
   $totalValues = @($usageEvents | ForEach-Object { if ($null -ne $_.usage.total_tokens) { [long]$_.usage.total_tokens } })
-  $usage = $(if ($null -ne $final.usage) {
+  $providerUsage = Read-QwenProviderUsage -LedgerPath $ProviderLedgerPath
+  $usage = $(if ($null -ne $providerUsage) {
+    $providerUsage
+  } elseif ($null -ne $final.usage) {
     $final.usage
   } elseif ($usageEvents.Count -gt 0) {
     [pscustomobject]@{
@@ -230,7 +283,7 @@ function Convert-QwenJsonOutput {
     }
     $text | Set-Content -LiteralPath $TextPath -Encoding UTF8
     $availability = $(if ($usage) { "reported" } else { "unavailable" })
-    $reason = $(if ($usage) { "Final result event reported usage." } else { "Final result event did not include usage." })
+    $reason = $(if ($providerUsage) { "Provider request ledger reported exact per-request usage." } elseif ($usage) { "Final result event reported usage." } else { "Final result event did not include usage." })
   } else {
     $failureType = [regex]::Match($stderrText, '"type"\s*:\s*"(?<type>[^"]+)"').Groups["type"].Value
     $reason = $(if ($failureType) {
@@ -242,6 +295,9 @@ function Convert-QwenJsonOutput {
     if ($usage) {
       $failureSuffix = $(if ($failureType) { " ($failureType)" } else { "" })
       $reason = "Recovered usage by summing provider-reported structured events before Qwen terminated$failureSuffix without a result event."
+      if ($providerUsage) {
+        $reason = "Recovered exact per-request usage from the provider ledger after Qwen terminated$failureSuffix without a result event."
+      }
     }
     $details = "Failed to parse Qwen JSON output: $reason"
     if (-not [string]::IsNullOrWhiteSpace($stderrText)) { $details += [Environment]::NewLine + $stderrText }
@@ -258,9 +314,14 @@ function Convert-QwenJsonOutput {
     input_tokens = $(if ($null -ne $usage.input_tokens) { [long]$usage.input_tokens } else { $null })
     output_tokens = $(if ($null -ne $usage.output_tokens) { [long]$usage.output_tokens } else { $null })
     cache_read_tokens = $(if ($null -ne $usage.cache_read_input_tokens) { [long]$usage.cache_read_input_tokens } elseif ($null -ne $usage.cache_read_tokens) { [long]$usage.cache_read_tokens } else { $null })
+    uncached_input_tokens = $(if ($null -ne $usage.uncached_input_tokens) { [long]$usage.uncached_input_tokens } elseif ($null -ne $usage.input_tokens) { [long][math]::Max(0, [long]$usage.input_tokens - [long]$(if ($null -ne $usage.cache_read_tokens) { $usage.cache_read_tokens } elseif ($null -ne $usage.cache_read_input_tokens) { $usage.cache_read_input_tokens } else { 0 })) } else { $null })
+    thinking_tokens = $(if ($null -ne $usage.thinking_tokens) { [long]$usage.thinking_tokens } else { $null })
     total_tokens = $(if ($null -ne $usage.total_tokens) { [long]$usage.total_tokens } else { $null })
-    num_turns = $(if ($null -ne $final.num_turns) { [int]$final.num_turns } elseif ($recoveredTurns -gt 0) { [int]$recoveredTurns } else { $null })
-    provider_duration_ms = $(if ($null -ne $final.duration_ms) { [long]$final.duration_ms } elseif ($null -ne $lastUsageEvent.event.duration_ms) { [long]$lastUsageEvent.event.duration_ms } else { $null })
+    num_turns = $(if ($null -ne $final.num_turns) { [int]$final.num_turns } elseif ($null -ne $providerUsage.request_count) { [int]$providerUsage.request_count } elseif ($recoveredTurns -gt 0) { [int]$recoveredTurns } else { $null })
+    request_count = $(if ($null -ne $providerUsage.request_count) { [int]$providerUsage.request_count } else { $null })
+    requests = $(if ($null -ne $providerUsage.requests) { @($providerUsage.requests) } else { @() })
+    provider_duration_ms = $(if ($null -ne $providerUsage.provider_duration_ms) { [long]$providerUsage.provider_duration_ms } elseif ($null -ne $lastUsageEvent.event.provider_duration_ms) { [long]$lastUsageEvent.event.provider_duration_ms } else { $null })
+    wall_duration_ms = $(if ($null -ne $final.duration_ms) { [long]$final.duration_ms } elseif ($null -ne $lastUsageEvent.event.duration_ms) { [long]$lastUsageEvent.event.duration_ms } else { $null })
   }
 }
 
@@ -268,8 +329,8 @@ if ($UsageParseOnly) {
   if ([string]::IsNullOrWhiteSpace($UsageParseJsonPath) -or [string]::IsNullOrWhiteSpace($UsageParseTextPath)) {
     throw "UsageParseOnly requires UsageParseJsonPath and UsageParseTextPath."
   }
-  Convert-QwenJsonOutput -JsonPath $UsageParseJsonPath -ErrorPath $UsageParseErrorPath -TextPath $UsageParseTextPath |
-    ConvertTo-Json -Compress -Depth 5
+  Convert-QwenJsonOutput -JsonPath $UsageParseJsonPath -ErrorPath $UsageParseErrorPath -ProviderLedgerPath $UsageParseProviderLedgerPath -TextPath $UsageParseTextPath |
+    ConvertTo-Json -Compress -Depth 8
   return
 }
 
@@ -376,6 +437,8 @@ This is attempt $Attempt of at most 2. If this is attempt 2, fix only the named 
 Your entire session is capped at $MaxSessionTurns assistant turns. Treat this as a hard work budget, not a target.
 Spend no more than one-third of the turns on inspection, then make the smallest sufficient change.
 Reserve the final 2 turns for one focused validation command and the final report. Stop as soon as both pass.
+Your wall-clock budget is $MaxWallTime. Do not start another large generated file after roughly 75% of that budget; finish the current file and leave an exact partial handoff instead.
+For tasks with multiple large output files, complete and validate one allowed file before starting the next. Preserve useful partial work when the deadline is close.
 For bounded tasks, do not create plans or todos, spawn agents, use computer control, or re-read unchanged files.
 Combine related reads and checks into one tool call when practical.
 Do not touch secrets, payment data, accounts, unrelated user files, drivers, registry, or system settings unless the user task explicitly asks for it.
@@ -391,6 +454,8 @@ At the end, report:
 Task from Codex:
 $Task
 "@
+$promptPath = Join-Path $runDir "worker-prompt.txt"
+[System.IO.File]::WriteAllText($promptPath, $workerPrompt, (New-Object System.Text.UTF8Encoding($false)))
 
 $meta = @()
 $meta += "TaskId: $TaskId"
@@ -443,6 +508,12 @@ try {
     $qwenHome = Join-Path $runDir "qwen-home"
     New-Item -ItemType Directory -Force -Path $qwenHome | Out-Null
     $env:QWEN_HOME = $qwenHome
+    $qwenSettings = [ordered]@{
+      security = [ordered]@{ auth = [ordered]@{ selectedType = "openai" } }
+      model = [ordered]@{ name = $selectedModel }
+    }
+    $settingsPath = Join-Path $qwenHome "settings.json"
+    [System.IO.File]::WriteAllText($settingsPath, ($qwenSettings | ConvertTo-Json -Depth 5), (New-Object System.Text.UTF8Encoding($false)))
 
     $qwenArgs = @(
       # Keep the command line short on Windows. The full worker prompt is
@@ -464,12 +535,12 @@ try {
       # first character (usually "{") before we can inspect the exit code and
       # structured output below.
       $ErrorActionPreference = "Continue"
-      $workerPrompt | & qwen @qwenArgs 1> $structuredResultPath 2> $qwenErrorPath
+      [System.IO.File]::ReadAllText($promptPath) | & qwen @qwenArgs 1> $structuredResultPath 2> $qwenErrorPath
       $workerExitCode = $LASTEXITCODE
     } finally {
       $ErrorActionPreference = $previousErrorAction
     }
-    $qwenMetrics = Convert-QwenJsonOutput -JsonPath $structuredResultPath -ErrorPath $qwenErrorPath -TextPath $resultPath
+    $qwenMetrics = Convert-QwenJsonOutput -JsonPath $structuredResultPath -ErrorPath $qwenErrorPath -ProviderLedgerPath (Join-Path $qwenHome "usage") -TextPath $resultPath
     if (-not $qwenMetrics) {
       $workerExitCode = 1
       $workerError = "Qwen structured output could not be parsed."
@@ -552,12 +623,12 @@ try {
         # See the Qwen branch above: preserve native stderr for the parser
         # instead of letting Windows PowerShell terminate on its first line.
         $ErrorActionPreference = "Continue"
-        $workerPrompt | & qwen @deepSeekArgs 1> $structuredResultPath 2> $qwenErrorPath
+        [System.IO.File]::ReadAllText($promptPath) | & qwen @deepSeekArgs 1> $structuredResultPath 2> $qwenErrorPath
         $workerExitCode = $LASTEXITCODE
       } finally {
         $ErrorActionPreference = $previousErrorAction
       }
-      $qwenMetrics = Convert-QwenJsonOutput -JsonPath $structuredResultPath -ErrorPath $qwenErrorPath -TextPath $resultPath
+      $qwenMetrics = Convert-QwenJsonOutput -JsonPath $structuredResultPath -ErrorPath $qwenErrorPath -ProviderLedgerPath (Join-Path $qwenHome "usage") -TextPath $resultPath
       if (-not $qwenMetrics) {
         $workerExitCode = 1
         $workerError = "Qwen structured output could not be parsed."
@@ -577,13 +648,16 @@ try {
       $claudeArgs = @(
         "--print",
         "--bare",
+        "--input-format", "text",
         "--model", $selectedModel,
         "--permission-mode", $permissionMode,
         "--max-budget-usd", ([string]$DeepSeekMaxBudgetUsd),
-        "--append-system-prompt", "Answer for Codex. Be concise. Codex is final reviewer.",
-        $workerPrompt
+        "--append-system-prompt", "Answer for Codex. Be concise. Codex is final reviewer."
       )
-      & claude @claudeArgs > $resultPath 2>&1
+      # Claude print mode reads the complete task from stdin. Supplying it as a
+      # positional argument caused the Windows shim/native CLI pair to start its
+      # stdin watchdog with no data and abort after three seconds.
+      [System.IO.File]::ReadAllText($promptPath) | & claude @claudeArgs > $resultPath 2>&1
       $workerExitCode = $LASTEXITCODE
     }
   }
@@ -673,8 +747,14 @@ $workerResult = [ordered]@{
     input_tokens = $qwenMetrics.input_tokens
     output_tokens = $qwenMetrics.output_tokens
     cache_read_tokens = $qwenMetrics.cache_read_tokens
+    uncached_input_tokens = $qwenMetrics.uncached_input_tokens
+    thinking_tokens = $qwenMetrics.thinking_tokens
     total_tokens = $qwenMetrics.total_tokens
     num_turns = $qwenMetrics.num_turns
+    request_count = $qwenMetrics.request_count
+    provider_duration_ms = $qwenMetrics.provider_duration_ms
+    wall_duration_ms = $qwenMetrics.wall_duration_ms
+    requests = @($qwenMetrics.requests)
   } } else { $null })
   changed_files = @($changedFiles)
   allowed_paths = @($AllowedPath)
@@ -688,7 +768,7 @@ $workerResult = [ordered]@{
     worker_result = $workerResultPath
   }
 }
-$workerResult | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $workerResultPath -Encoding UTF8
+$workerResult | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $workerResultPath -Encoding UTF8
 
 $workerEndedAt = Get-Date
 $estimatedCostCny = Get-EstimatedCostCny -Provider $Worker -Model $selectedModel -Metrics $qwenMetrics
@@ -708,11 +788,16 @@ $ledgerEvent = [ordered]@{
   input_tokens = $(if ($qwenMetrics) { $qwenMetrics.input_tokens } else { $null })
   output_tokens = $(if ($qwenMetrics) { $qwenMetrics.output_tokens } else { $null })
   cache_read_tokens = $(if ($qwenMetrics) { $qwenMetrics.cache_read_tokens } else { $null })
+  uncached_input_tokens = $(if ($qwenMetrics) { $qwenMetrics.uncached_input_tokens } else { $null })
+  thinking_tokens = $(if ($qwenMetrics) { $qwenMetrics.thinking_tokens } else { $null })
   total_tokens = $(if ($qwenMetrics) { $qwenMetrics.total_tokens } else { $null })
   num_turns = $(if ($qwenMetrics) { $qwenMetrics.num_turns } else { $null })
+  request_count = $(if ($qwenMetrics) { $qwenMetrics.request_count } else { $null })
+  provider_duration_ms = $(if ($qwenMetrics) { $qwenMetrics.provider_duration_ms } else { $null })
+  requests = $(if ($qwenMetrics) { @($qwenMetrics.requests) } else { @() })
   actual_cost = $null
   estimated_cost_cny = $estimatedCostCny
-  cost_note = $(if ($qwenMetrics -and $qwenMetrics.availability -eq "reported") { "Exact CLI token usage; CNY cost is a catalog estimate and provider billing is authoritative" } elseif ($qwenMetrics -and $qwenMetrics.availability -eq "recovered") { "Usage recovered from a structured pre-failure event; provider billing remains authoritative" } elseif ($Worker -eq "deepseek" -and $DeepSeekHarness -eq "claude") { "CLI actual usage unavailable; Claude harness request cap was USD $DeepSeekMaxBudgetUsd" } else { "CLI usage unavailable; no token or cost value was fabricated" })
+  cost_note = $(if ($qwenMetrics -and $qwenMetrics.availability -eq "reported") { "Exact provider token usage; catalog estimate does not apply provider-specific cache discounts, and provider billing is authoritative" } elseif ($qwenMetrics -and $qwenMetrics.availability -eq "recovered") { "Usage recovered from provider records after failure; provider billing remains authoritative" } elseif ($Worker -eq "deepseek" -and $DeepSeekHarness -eq "claude") { "CLI actual usage unavailable; Claude harness request cap was USD $DeepSeekMaxBudgetUsd" } else { "CLI usage unavailable; no token or cost value was fabricated" })
   harness = $(if ($Worker -eq "deepseek") { $DeepSeekHarness } else { "qwen" })
   worker_result = $workerResultPath
 }
