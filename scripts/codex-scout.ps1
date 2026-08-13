@@ -3,6 +3,8 @@ param(
   [Parameter(Mandatory = $true)]
   [string]$Task,
 
+  [string]$TaskId = "",
+
   [string]$Cwd = (Get-Location).Path,
 
   [ValidateSet("auto", "qwen", "deepseek")]
@@ -13,8 +15,8 @@ param(
 
   [string]$MaxWallTime = "5m",
 
-  [ValidateRange(2, 8)]
-  [int]$MaxSessionTurns = 2,
+  [ValidateRange(3, 8)]
+  [int]$MaxSessionTurns = 4,
 
   [ValidateSet("low", "normal", "deep")]
   [string]$Budget = "low",
@@ -166,6 +168,7 @@ if (-not (Test-Path -LiteralPath $workerScript)) {
 $workerArgs = @{
   Worker = $Worker
   Task = $scoutTask
+  TaskId = $TaskId
   Cwd = $Cwd
   Approval = "auto"
   Budget = $Budget

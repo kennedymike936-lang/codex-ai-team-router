@@ -3,6 +3,24 @@ const RETRY_TURNS = 4;
 const COMPLEX_TURNS = 12;
 const MEDIUM_TURNS = 10;
 const SMALL_TURNS = 6;
+const SCOUT_RETRY_TURNS = 3;
+const SCOUT_TURNS = { small: 3, medium: 4, complex: 6 };
+
+export function selectScoutTurnPolicy({ complexity = "medium", attempt = 1 } = {}) {
+  const normalized = Object.hasOwn(SCOUT_TURNS, complexity) ? complexity : "medium";
+  const isRetry = attempt > 1;
+  const turns = isRetry ? SCOUT_RETRY_TURNS : SCOUT_TURNS[normalized];
+  return {
+    max_session_turns: turns,
+    policy: isRetry ? "focused_scout_failover" : `${normalized}_scout_turns`,
+    complexity: normalized,
+    attempt,
+    hard_cap: 6,
+    reason: isRetry
+      ? "Focused read-only failover with one discovery turn, one evidence turn, and one final answer turn"
+      : `Read-only ${normalized} inspection reserves a final answer turn after bounded discovery`,
+  };
+}
 
 /**
  * Selects the max-session-turns policy for a project_task worker attempt.

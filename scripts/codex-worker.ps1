@@ -423,6 +423,7 @@ $taskPath = Join-Path $runDir "task.txt"
 $resultPath = Join-Path $runDir "result.txt"
 $structuredResultPath = Join-Path $runDir "qwen-result.json"
 $qwenErrorPath = Join-Path $runDir "qwen-stderr.txt"
+$claudeErrorPath = Join-Path $runDir "claude-stderr.txt"
 $summaryPath = Join-Path $runDir "summary.txt"
 $metaPath = Join-Path $runDir "meta.txt"
 $workerResultPath = Join-Path $runDir "worker-result.json"
@@ -657,8 +658,34 @@ try {
       # Claude print mode reads the complete task from stdin. Supplying it as a
       # positional argument caused the Windows shim/native CLI pair to start its
       # stdin watchdog with no data and abort after three seconds.
-      [System.IO.File]::ReadAllText($promptPath) | & claude @claudeArgs > $resultPath 2>&1
-      $workerExitCode = $LASTEXITCODE
+      $previousErrorAction = $ErrorActionPreference
+      $previousContextTokens = $env:CLAUDE_CODE_MAX_CONTEXT_TOKENS
+      try {
+        # Value-platform DeepSeek v4 models are configured with a 1M context in
+        # the Qwen harness above. Apply the same mapping only to this child run
+        # so Claude Code does not guess a 200k window for an unknown model name.
+        if ([string]::IsNullOrWhiteSpace($previousContextTokens) -and $selectedModel -match '^deepseek-v4-(?:flash|pro)$') {
+          $env:CLAUDE_CODE_MAX_CONTEXT_TOKENS = "1000000"
+        }
+        # Claude Code writes advisory diagnostics (including unknown-model
+        # context guidance) to stderr. Windows PowerShell must not promote those
+        # warnings to terminating ErrorRecords; the native exit code remains the
+        # authoritative success signal.
+        $ErrorActionPreference = "Continue"
+        [System.IO.File]::ReadAllText($promptPath) | & claude @claudeArgs 1> $resultPath 2> $claudeErrorPath
+        $workerExitCode = $LASTEXITCODE
+      } finally {
+        $ErrorActionPreference = $previousErrorAction
+        if ($null -eq $previousContextTokens) {
+          Remove-Item Env:CLAUDE_CODE_MAX_CONTEXT_TOKENS -ErrorAction SilentlyContinue
+        } else {
+          $env:CLAUDE_CODE_MAX_CONTEXT_TOKENS = $previousContextTokens
+        }
+      }
+      if ($workerExitCode -ne 0 -and (Test-Path -LiteralPath $claudeErrorPath)) {
+        $claudeFailure = (Get-Content -LiteralPath $claudeErrorPath -Raw -ErrorAction SilentlyContinue).Trim()
+        if (-not [string]::IsNullOrWhiteSpace($claudeFailure)) { $workerError = $claudeFailure }
+      }
     }
   }
 } catch {
@@ -762,7 +789,7 @@ $workerResult = [ordered]@{
     run_dir = $runDir
     full_result = $resultPath
     structured_result = $(if (Test-Path -LiteralPath $structuredResultPath) { $structuredResultPath } else { $null })
-    stderr = $(if (Test-Path -LiteralPath $qwenErrorPath) { $qwenErrorPath } else { $null })
+    stderr = $(if ($Worker -eq "deepseek" -and $DeepSeekHarness -eq "claude" -and (Test-Path -LiteralPath $claudeErrorPath)) { $claudeErrorPath } elseif (Test-Path -LiteralPath $qwenErrorPath) { $qwenErrorPath } else { $null })
     summary = $summaryPath
     metadata = $metaPath
     worker_result = $workerResultPath

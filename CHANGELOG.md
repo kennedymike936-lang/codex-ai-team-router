@@ -24,6 +24,9 @@ All notable changes to this project will be documented here. The format follows 
 
 - DeepSeek's Claude-compatible harness now receives the worker task through explicit text stdin instead of a long positional argument, preventing the Windows three-second stdin initialization failure.
 - Isolated Qwen workers now create their own minimal settings file and use a stable prompt file, avoiding inherited configuration noise and command-line truncation.
+- Read-only Scouts now receive complexity-aware 3/4/6-turn budgets with a reserved conclusion turn instead of failing after two discovery turns.
+- Claude-compatible DeepSeek runs now log advisory stderr separately and decide success from the native exit code; known DeepSeek v4 models receive a run-local 1M context-window override without changing global Claude settings.
+- The parent `project_task` ID now propagates through Planner, Scout, Worker, usage, and Gate artifacts for end-to-end auditability.
 
 ### Security
 

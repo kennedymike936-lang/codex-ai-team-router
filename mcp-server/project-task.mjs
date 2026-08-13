@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { mechanicalInspect } from "./mechanical-inspector.mjs";
 import { planTaskTeam } from "./team-planner.mjs";
-import { buildTargetedRetryPrompt, selectTurnPolicy } from "./turn-policy.mjs";
+import { buildTargetedRetryPrompt, selectScoutTurnPolicy, selectTurnPolicy } from "./turn-policy.mjs";
 
 const execFileAsync = promisify(execFile);
 const serverDir = dirname(fileURLToPath(import.meta.url));
@@ -146,10 +146,11 @@ export async function ensureGitBaseline(cwd, mode) {
   }
 }
 
-async function runScout({ task, cwd, worker, harness = "qwen", budget, maxWallTime, timeoutMs, maxTurns = 2, summaryMaxChars = 2400 }) {
+async function runScout({ task, taskId, cwd, worker, harness = "qwen", budget, maxWallTime, timeoutMs, maxTurns = 4, summaryMaxChars = 2400 }) {
   const scoutScript = await resolveScript("codex-scout.ps1");
   const scriptArgs = [
     "-Task", String(task),
+    "-TaskId", String(taskId || ""),
     "-Cwd", cwd,
     "-Worker", worker,
     "-Budget", budget,
@@ -461,18 +462,21 @@ export async function runProjectTask(args = {}) {
   const changedFileSet = new Set();
 
   if (preview.mode === "inspect") {
+    const firstScoutPolicy = selectScoutTurnPolicy({ complexity: preview.complexity.level, attempt: initialAttempt });
     const workers = preview.team.coding_assistants >= 2
       ? [preview.worker, preview.planner]
       : [preview.worker];
     const initialRoutes = workers.map((worker) => ({ worker, harness: "qwen" }));
     const settled = await Promise.allSettled(initialRoutes.map((route) => runScout({
       task: args.task,
+      taskId,
       cwd,
       worker: route.worker,
       harness: route.harness,
       budget: preview.budget,
       maxWallTime: `${deadline.max_wall_time_seconds[0]}s`,
       timeoutMs: deadline.attempt_timeout_seconds[0] * 1000,
+      maxTurns: firstScoutPolicy.max_session_turns,
     })));
     const results = settled.map((entry, index) => entry.status === "fulfilled"
       ? entry.value
@@ -496,7 +500,7 @@ export async function runProjectTask(args = {}) {
       gate_decision: null,
       gate_score: null,
       failure_kind: firstFailure.kind,
-      turn_policy: selectTurnPolicy({ complexity: preview.complexity.level, attempt: initialAttempt }),
+      turn_policy: firstScoutPolicy,
     });
 
     if (preview.worker_failover && firstFailure.retryable && initialAttempt < finalAttempt) {
@@ -507,13 +511,14 @@ export async function runProjectTask(args = {}) {
       try {
         fallbackResult = await runScout({
           task: [String(args.task), fallbackTask].join("\n\n"),
+          taskId,
           cwd,
           worker: fallbackRoute.worker,
           harness: fallbackRoute.harness,
           budget: preview.budget,
           maxWallTime: `${deadline.max_wall_time_seconds[1]}s`,
           timeoutMs: deadline.attempt_timeout_seconds[1] * 1000,
-          maxTurns: selectTurnPolicy({ complexity: preview.complexity.level, attempt: 2 }).max_session_turns,
+          maxTurns: selectScoutTurnPolicy({ complexity: preview.complexity.level, attempt: 2 }).max_session_turns,
         });
       } catch (error) {
         fallbackResult = {
@@ -539,7 +544,7 @@ export async function runProjectTask(args = {}) {
         gate_decision: null,
         gate_score: null,
         failure_kind: fallbackFailure.kind,
-        turn_policy: selectTurnPolicy({ complexity: preview.complexity.level, attempt: 2 }),
+        turn_policy: selectScoutTurnPolicy({ complexity: preview.complexity.level, attempt: 2 }),
       });
     }
   } else {
@@ -552,6 +557,7 @@ export async function runProjectTask(args = {}) {
             "Do not edit files.",
             String(args.task),
           ].join("\n\n"),
+          taskId,
           cwd,
           worker: preview.planner,
           budget: "low",
@@ -694,8 +700,12 @@ export async function runProjectTask(args = {}) {
     planner: preview.planner,
     complexity: preview.complexity,
     turn_policy: {
-      first_attempt: selectTurnPolicy({ complexity: preview.complexity.level, attempt: 1 }),
-      targeted_retry: selectTurnPolicy({ complexity: preview.complexity.level, attempt: 2 }),
+      first_attempt: preview.mode === "inspect"
+        ? selectScoutTurnPolicy({ complexity: preview.complexity.level, attempt: 1 })
+        : selectTurnPolicy({ complexity: preview.complexity.level, attempt: 1 }),
+      targeted_retry: preview.mode === "inspect"
+        ? selectScoutTurnPolicy({ complexity: preview.complexity.level, attempt: 2 })
+        : selectTurnPolicy({ complexity: preview.complexity.level, attempt: 2 }),
       planner_max_session_turns: deadline.planner_max_turns,
     },
     team: {

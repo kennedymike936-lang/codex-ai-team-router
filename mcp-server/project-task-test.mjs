@@ -308,7 +308,7 @@ test("project_task switches once from a turn-limited Qwen scout to an independen
   await mkdir(cwd);
   await mkdir(scripts);
   const scoutScript = String.raw`param(
-  [string]$Task, [string]$Cwd, [string]$Worker, [string]$DeepSeekHarness,
+  [string]$Task, [string]$TaskId, [string]$Cwd, [string]$Worker, [string]$DeepSeekHarness,
   [string]$Budget, [string]$MaxWallTime, [int]$MaxSessionTurns,
   [int]$SummaryMaxChars, [switch]$JsonOnly
 )
@@ -323,7 +323,9 @@ $failed = $Worker -eq "qwen"
   usage = [ordered]@{ input_tokens = 4; output_tokens = 2; total_tokens = 6; num_turns = 1 }
   changed_files = @()
   scout_pack = [ordered]@{ enabled = $false; reason = "fixture"; char_count = 0; max_chars = 1000; truncated = $false; file_count = 0; match_count = 0; elapsed_ms = 0; wrapper_elapsed_ms = 1 }
-  artifacts = [ordered]@{ run_dir = "fake-$Worker-$DeepSeekHarness"; worker_result = ""; full_result = "" }
+  task_id = $TaskId
+  artifacts = [ordered]@{ run_dir = "fake-$TaskId-$Worker-$DeepSeekHarness"; worker_result = ""; full_result = "" }
+  received_task_id = $TaskId
 } | ConvertTo-Json -Depth 5 -Compress
 `;
 
@@ -348,6 +350,9 @@ $failed = $Worker -eq "qwen"
     assert.deepEqual(result.attempts[0].failover_to, { worker: "deepseek", harness: "claude" });
     assert.match(result.summary, /fallback inspection complete/);
     assert.equal(result.artifacts.team_runs.length, 2);
+    assert.ok(result.artifacts.team_runs.every((run) => run.includes(result.task_id)));
+    assert.equal(result.turn_policy.first_attempt.max_session_turns, 3);
+    assert.equal(result.turn_policy.targeted_retry.max_session_turns, 3);
   } finally {
     if (previousScriptRoot === undefined) delete process.env.AI_TEAM_SCRIPT_ROOT;
     else process.env.AI_TEAM_SCRIPT_ROOT = previousScriptRoot;

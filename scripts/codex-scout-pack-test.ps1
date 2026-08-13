@@ -42,6 +42,7 @@ try {
 
   $scoutText = Get-Content -LiteralPath $scoutScript -Raw -Encoding UTF8
   if ($scoutText -notmatch "codex-scout-pack\.ps1" -or $scoutText -notmatch "do not call any tools" -or $scoutText -notmatch 'kind = "scout_pack"') { throw "Scout integration or ledger wiring is incomplete." }
+  if ($scoutText -notmatch '\[string\]\$TaskId' -or $scoutText -notmatch 'TaskId = \$TaskId' -or $scoutText -notmatch '\[int\]\$MaxSessionTurns = 4') { throw "Scout TaskId propagation or safe default turn budget is incomplete." }
 
   $previousMode = $env:AI_TEAM_SCOUT_PACK
   try {

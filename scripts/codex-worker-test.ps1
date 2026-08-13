@@ -84,12 +84,36 @@ try {
   foreach ($requiredGuidance in @("hard work budget", "one-third of the turns", "Reserve the final 2 turns", "do not create plans or todos")) {
     if (-not $sourceText.Contains($requiredGuidance)) { throw "Missing turn-budget guidance: $requiredGuidance" }
   }
-  foreach ($requiredReliabilityText in @("Do not start another large generated file", "complete and validate one allowed file", '"--input-format", "text"', "ReadAllText(`$promptPath) | & claude")) {
+  foreach ($requiredReliabilityText in @("Do not start another large generated file", "complete and validate one allowed file", '"--input-format", "text"', "ReadAllText(`$promptPath) | & claude", 'CLAUDE_CODE_MAX_CONTEXT_TOKENS = "1000000"', '2> $claudeErrorPath')) {
     if (-not $sourceText.Contains($requiredReliabilityText)) { throw "Missing worker reliability behavior: $requiredReliabilityText" }
   }
   if ($sourceText -match '(?s)\$claudeArgs\s*=\s*@\(.*?\$workerPrompt.*?\)') {
     throw "Claude args must not carry the full worker prompt as a positional argument."
   }
+
+  # A Claude-compatible CLI may emit an advisory on stderr while succeeding.
+  # Reproduce that Windows PowerShell behavior without a provider call.
+  $fakeClaude = Join-Path $fixture "fake-claude.ps1"
+  $fakeStdout = Join-Path $fixture "fake-claude-stdout.txt"
+  $fakeStderr = Join-Path $fixture "fake-claude-stderr.txt"
+  @'
+param()
+[Console]::Error.WriteLine("unknown-model context advisory")
+Write-Output "completed"
+exit 0
+'@ | Set-Content -LiteralPath $fakeClaude -Encoding UTF8
+  $previousErrorAction = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = "Continue"
+    "fixture prompt" | & $fakeClaude 1> $fakeStdout 2> $fakeStderr
+    $fakeExit = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousErrorAction
+  }
+  if ($fakeExit -ne 0 -or (Get-Content -LiteralPath $fakeStdout -Raw) -notmatch "completed" -or (Get-Content -LiteralPath $fakeStderr -Raw) -notmatch "advisory") {
+    throw "Claude stderr advisory must be logged without converting an exit-0 run into failure."
+  }
+  Write-Host "Claude stderr advisory fixture: passed"
 
   function Test-ArgArrayHasFlag {
     param([string[]]$Lines, [string]$VarName, [string]$Flag)
