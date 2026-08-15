@@ -46,7 +46,7 @@ flowchart LR
 - `delegate_task`：处理不需要本地文件工具的问答、草稿和分析；按任务复杂度自动选择一个或两个代码 Worker，复杂且依赖实时资料时再加入 Grok。
 - `grok_search`：一次只读 Web Search 或 X Search，`source=auto` 时一般实时资讯走 Web、帖子和舆论走 X；默认限制一个服务端工具回合。
 - `budget_route`：在用户主动配置的 OpenRouter、Groq、Gemini、OpenAI Responses 或管理员配置的 OpenAI-compatible 服务范围内，按能力、已知价格、隐私、延迟、健康状态和剩余限额解释并选择模型；默认只预览。
-- `doctor`：只读检查 Node、PowerShell、Git、Qwen 外壳、各 Provider 凭证是否存在，以及 MCP/Windows 系统代理是否配置；只返回布尔状态和安全建议，不读取或返回密钥、代理 URL 与凭证，也不发起模型调用。
+- `doctor`：只读检查 Node、PowerShell、Git、Qwen/Grok Build 外壳、各 Provider 凭证是否存在，以及 MCP/Windows 系统代理是否配置；只返回布尔状态和安全建议，不读取或返回密钥、登录文件、代理 URL 与凭证，也不发起模型调用。
 - `project_task`：把一整段本地侦查或实现交给自动扩编的 Qwen/DeepSeek 团队；实现后可自动运行确定性 Gate，只把交接包返回 Codex。
 - `worker_gate_review`：对结构化结果做确定性质量决策，也兼容原有的 diff 轻量审查。
 
@@ -58,6 +58,7 @@ flowchart LR
 - 多助手实现采用“只读规划/侦查 -> 单个 Worker 写入 -> Gate 验收”，两个代码助手不会并发修改同一个工作目录。
 - `project_task` 把文件发现、批量编辑和验证合并成一个 MCP 回合，避免 Codex 自己形成几十次 shell 循环。
 - Grok Search 默认 `max_turns=1`、关闭并行工具，只允许 X 或 Web 二选一，控制搜索调用费用。
+- 可选 Grok Build 使用官方 CLI 的无头 JSON 模式；仅在已显式启用、登录态存在且任务为复杂实现时进入自动路由，仍保持单写入 Worker 和确定性 Gate。
 - 默认从服务商 `/models` 接口发现账号当前可用模型，并按代际与 `Flash / Plus / Pro` 档位自动选择。
 - 模型列表缓存一小时；新一代稳定别名上线后无需修改配置，模型不可用时同服务商最多回退一次。
 - `dry_run` 路由预览不发送生成请求；`budget_route` 仍可能读取服务商 `/models` 元数据。
@@ -69,7 +70,7 @@ flowchart LR
 - Gate 检查构建、测试、类型检查、lint、HTML 内联脚本语法、diff 大小、依赖变化和密钥痕迹。
 - 质量策略固定为：90 分以上接受、80～89 分只返工一次、低于 80 分由 Codex 接管。
 - `project_task` 在首次 Gate 返回 `retry` 时会在同一个 MCP 调用内自动执行一次定向返工，并合并两轮修改和用量；第二轮仍不合格才交给 Codex。
-- Scout/Worker 遇到轮次上限、超时、429/5xx、进程或结构化输出故障时，最多自动切换一次到独立助手/外壳；认证、权限、Key 配置和安全错误立即停止。
+- Scout/Worker 遇到轮次上限、超时、5xx、进程或结构化输出故障时，最多自动切换一次到独立助手/外壳；认证、权限、Key 配置、安全错误，以及 Grok Build 的登录、地区、429 或额度耗尽错误立即停止。
 - 联网请求会区分 DNS、连接超时/拒绝、网络不可达、连接重置、TLS 和请求超时；安全可重放的失败最多重试一次，付费 POST 在送达状态不明时不会自动重放。
 - 构建/测试失败、密钥痕迹、越界修改等硬故障会跳过返工，立即要求 Codex 接管。
 - Planner、Scout、Worker 和 Gate 贯穿同一个 `project-*` 任务 ID 并生成 JSON 交接文件，Codex 接手时无需重新扫描整个项目。
@@ -145,7 +146,7 @@ codex-ai-team-router/
 │  └─ package.json
 ├─ scripts/
 │  ├─ codex-scout.ps1     # 只读侦查，返回短结论
-│  ├─ codex-worker.ps1    # Qwen Code / Claude Code-DeepSeek 执行器
+│  ├─ codex-worker.ps1    # Qwen Code / DeepSeek / Grok Build 执行器
 │  ├─ codex-gate.ps1      # 本地验收与交接包生成器
 │  └─ codex-gate-test.ps1
 ├─ examples/
@@ -168,7 +169,8 @@ MCP Router：
 可选 Worker：
 
 - Qwen Code CLI，用于 Qwen agent 模式
-- Claude Code CLI，用于通过 Anthropic 兼容接口调用 DeepSeek agent 模式
+- DeepSeek 复用隔离的 Qwen Code OpenAI-compatible 外壳，不需要 Claude Code
+- 可选官方 Grok Build CLI，用于复杂实现或独立复核
 - Git，用于 diff 与仓库检查
 - 项目自身需要的 npm / Python / 编译工具
 
@@ -192,6 +194,24 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -DeployRoot "D:\AI-Team"
 ```
+
+### 可选：Grok Build
+
+安装和登录均交给 xAI 官方 CLI；Router 只调用 `grok` 命令，不读取或复制登录文件：
+
+```powershell
+irm https://x.ai/cli/install.ps1 | iex
+grok login
+```
+
+无浏览器回调时可改用 `grok login --device-auth`。登录后在 MCP 环境中设置：
+
+```toml
+AI_TEAM_GROK_BUILD_ENABLED = 'true'
+AI_TEAM_GROK_BUILD_AUTH = 'account'
+```
+
+`account` 是默认认证模式，运行子进程时会移除 `XAI_API_KEY`，避免免费 Build 额度不可用时静默转为 API 付费。只有管理员明确改成 `api_key` 才允许使用 API Key。Router 不自动登录、充值、切换账号、搜索公共代理或切换机场节点；可信本地代理只能由用户主动配置。
 
 ## API 环境变量
 
@@ -374,7 +394,7 @@ worker_gate_review
 }
 ```
 
-只读侦查时把 `mode` 设为 `inspect`。`max_assistants` 是费用上限，不是固定人数；自动调度只会使用必要的助手。`worker_failover` 默认开启：轮次上限、超时、429/5xx、进程或输出解析故障会最多切换一次（Qwen 外壳故障优先改走 `DeepSeek + Claude` 独立外壳），再失败则由 Codex 接管；认证、权限、Key 配置和安全错误不会切换。实现模式默认使用非交互权限，非 Git 目录会先初始化本地 Git 基线；允许路径、Git diff、密钥扫描和项目检查由 Gate 兜底。首次 Gate 只要求返工时，`project_task` 会内部自动完成第二次定向尝试，无需 Codex 再发一次 MCP 请求。完整产物留在 `%USERPROFILE%\.codex-ai-team\runs`，MCP 只返回短摘要和路径。
+只读侦查时把 `mode` 设为 `inspect`。`max_assistants` 是费用上限，不是固定人数；自动调度只会使用必要的助手。`worker_failover` 默认开启：轮次上限、超时、5xx、进程或输出解析故障会最多切换一次，再失败则由 Codex 接管；认证、权限、Key 配置和安全错误不会切换，Grok Build 的登录、地区、429 和额度耗尽也会立即停止。实现模式默认使用非交互权限，非 Git 目录会先初始化本地 Git 基线；允许路径、Git diff、密钥扫描和项目检查由 Gate 兜底。首次 Gate 只要求返工时，`project_task` 会内部自动完成第二次定向尝试，无需 Codex 再发一次 MCP 请求。完整产物留在 `%USERPROFILE%\.codex-ai-team\runs`，MCP 只返回短摘要和路径。
 
 确定性质量决策（不调用模型 API）：
 

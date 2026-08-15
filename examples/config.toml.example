@@ -9,6 +9,10 @@ QWEN_MCP_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
 DEEPSEEK_MCP_BASE_URL = 'https://api.deepseek.com/anthropic'
 XAI_MCP_BASE_URL = 'https://api.x.ai/v1'
 AI_TEAM_PROXY_MODE = 'fallback'
+# Optional official Grok Build CLI worker. Account auth is intentionally the
+# default so enabling it cannot silently spend XAI_API_KEY credit.
+AI_TEAM_GROK_BUILD_ENABLED = 'false'
+AI_TEAM_GROK_BUILD_AUTH = 'account'
 # Optional trusted HTTP/HTTPS proxy. On Windows, scripts/codex-proxy-health.ps1
 # can detect and test the current local system proxy without printing its URL.
 # Prefer a user/system environment variable if the URL contains credentials.

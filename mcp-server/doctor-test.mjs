@@ -4,6 +4,7 @@ import { commandExists, DIAGNOSTIC_ONLY, PROXY_POLICY, runDoctor } from "./docto
 const fakeExec = (file, args) => {
   if (file === "where") {
     if (args[0] === "qwen") return "C:\\tools\\qwen.cmd";
+    if (args[0] === "grok") return "C:\\tools\\grok.exe";
     throw new Error("not found");
   }
   if (file === "node" && args[0] === "--version") return "v20.11.0";
@@ -37,7 +38,11 @@ assert.deepEqual(
 );
 assert.deepEqual(result.harness.map((h) => [h.command, h.available]), [
   ["qwen", true],
+  ["grok", true],
 ]);
+assert.equal(result.grok_build.command_available, true);
+assert.equal(result.grok_build.enabled, false);
+assert.equal(result.grok_build.ready, false);
 
 // Providers: presence only, never values.
 const qwen = result.providers.find((p) => p.provider === "qwen");

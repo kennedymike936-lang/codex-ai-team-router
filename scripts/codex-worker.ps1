@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet("qwen", "deepseek")]
+  [ValidateSet("qwen", "deepseek", "grok")]
   [string]$Worker,
 
   [Parameter(Mandatory = $true)]
@@ -33,6 +33,9 @@ param(
 
   [string]$DeepSeekModel = "auto",
 
+  [ValidateSet("account", "api_key")]
+  [string]$GrokBuildAuth = "account",
+
   [string]$OutRoot = (Join-Path $env:USERPROFILE ".codex-ai-team\runs"),
 
   [string]$UsageLedger = (Join-Path $env:USERPROFILE ".codex-ai-team\usage\worker-runs.jsonl"),
@@ -51,7 +54,15 @@ param(
 
   [string]$UsageParseProviderLedgerPath = "",
 
-  [string]$UsageParseTextPath = ""
+  [string]$UsageParseTextPath = "",
+
+  [switch]$GrokParseOnly,
+
+  [string]$GrokParseJsonPath = "",
+
+  [string]$GrokParseErrorPath = "",
+
+  [string]$GrokParseTextPath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -87,6 +98,7 @@ function Add-ToolPath {
     $env:AI_TEAM_NODE_DIR,
     $env:AI_TEAM_GIT_DIR,
     $env:AI_TEAM_TOOLS_DIR,
+    (Join-Path $env:USERPROFILE ".grok\bin"),
     (Join-Path $env:USERPROFILE ".cache\codex-runtimes\codex-primary-runtime\dependencies\native\git\cmd"),
     (Join-Path $env:ProgramFiles "Git\cmd"),
     (Join-Path $env:APPDATA "npm")
@@ -320,11 +332,95 @@ function Convert-QwenJsonOutput {
   }
 }
 
+function Convert-GrokJsonOutput {
+  param(
+    [string]$JsonPath,
+    [string]$ErrorPath,
+    [string]$TextPath
+  )
+
+  $raw = $(if (Test-Path -LiteralPath $JsonPath) { Get-Content -LiteralPath $JsonPath -Raw -ErrorAction SilentlyContinue } else { "" })
+  $stderrRaw = $(if (Test-Path -LiteralPath $ErrorPath) { Get-Content -LiteralPath $ErrorPath -Raw -ErrorAction SilentlyContinue } else { "" })
+  $stderrText = $(if ($null -ne $stderrRaw) { ([string]$stderrRaw).Trim() } else { "" })
+  $data = $null
+  if (-not [string]::IsNullOrWhiteSpace([string]$raw)) {
+    try { $data = ([string]$raw | ConvertFrom-Json) } catch {}
+  }
+
+  if ($data -and $data.PSObject.Properties.Name -contains "text") {
+    $text = [string]$data.text
+    if ([string]::IsNullOrWhiteSpace($text)) { $text = "Grok Build completed without response text." }
+    $text | Set-Content -LiteralPath $TextPath -Encoding UTF8
+    $usage = $data.usage
+    return [pscustomobject]@{
+      parsed = $true
+      is_error = $false
+      error_message = ""
+      availability = $(if ($usage) { "reported" } else { "unavailable" })
+      availability_reason = $(if ($usage) { "Grok Build final JSON reported usage." } else { "Grok Build completed without usage fields." })
+      input_tokens = $(if ($null -ne $usage.input_tokens) { [long]$usage.input_tokens } else { $null })
+      output_tokens = $(if ($null -ne $usage.output_tokens) { [long]$usage.output_tokens } else { $null })
+      cache_read_tokens = $(if ($null -ne $usage.cache_read_input_tokens) { [long]$usage.cache_read_input_tokens } else { $null })
+      cache_creation_tokens = $(if ($null -ne $usage.cache_creation_input_tokens) { [long]$usage.cache_creation_input_tokens } else { $null })
+      uncached_input_tokens = $(if ($null -ne $usage.input_tokens) { [long]$usage.input_tokens } else { $null })
+      thinking_tokens = $(if ($null -ne $usage.reasoning_tokens) { [long]$usage.reasoning_tokens } else { $null })
+      total_tokens = $(if ($null -ne $usage.total_tokens) { [long]$usage.total_tokens } elseif ($null -ne $usage.input_tokens -or $null -ne $usage.output_tokens) { [long]$(0 + $usage.input_tokens + $usage.cache_read_input_tokens + $usage.cache_creation_input_tokens + $usage.output_tokens) } else { $null })
+      num_turns = $(if ($null -ne $data.num_turns) { [int]$data.num_turns } else { $null })
+      request_count = $(if ($null -ne $data.num_turns) { [int]$data.num_turns } else { $null })
+      requests = @()
+      provider_duration_ms = $null
+      wall_duration_ms = $null
+      actual_cost = $(if ($null -ne $data.total_cost_usd) { [decimal]$data.total_cost_usd } else { $null })
+      actual_cost_ticks = $(if ($null -ne $data.total_cost_usd_ticks) { [long]$data.total_cost_usd_ticks } else { $null })
+      models = $(if ($data.modelUsage) { @($data.modelUsage.PSObject.Properties.Name) } else { @() })
+      session_id = $(if ($data.sessionId) { [string]$data.sessionId } else { $null })
+      stop_reason = $(if ($data.stopReason) { [string]$data.stopReason } else { $null })
+    }
+  }
+
+  $message = $(if ($data -and $data.message) { [string]$data.message } elseif (-not [string]::IsNullOrWhiteSpace($stderrText)) { $stderrText } else { "Grok Build did not return a valid final JSON result." })
+  $failureUsage = $(if ($data) { $data.usage } else { $null })
+  "Grok Build failed: $message" | Set-Content -LiteralPath $TextPath -Encoding UTF8
+  return [pscustomobject]@{
+    parsed = [bool]$data
+    is_error = $true
+    error_message = $message
+    availability = $(if ($failureUsage) { "recovered" } else { "unavailable" })
+    availability_reason = $(if ($failureUsage) { "Grok Build failure JSON reported frozen usage." } else { "Grok Build did not report verifiable usage." })
+    input_tokens = $(if ($null -ne $failureUsage.input_tokens) { [long]$failureUsage.input_tokens } else { $null })
+    output_tokens = $(if ($null -ne $failureUsage.output_tokens) { [long]$failureUsage.output_tokens } else { $null })
+    cache_read_tokens = $(if ($null -ne $failureUsage.cache_read_input_tokens) { [long]$failureUsage.cache_read_input_tokens } else { $null })
+    cache_creation_tokens = $(if ($null -ne $failureUsage.cache_creation_input_tokens) { [long]$failureUsage.cache_creation_input_tokens } else { $null })
+    uncached_input_tokens = $(if ($null -ne $failureUsage.input_tokens) { [long]$failureUsage.input_tokens } else { $null })
+    thinking_tokens = $(if ($null -ne $failureUsage.reasoning_tokens) { [long]$failureUsage.reasoning_tokens } else { $null })
+    total_tokens = $(if ($null -ne $failureUsage.total_tokens) { [long]$failureUsage.total_tokens } elseif ($failureUsage) { [long]$(0 + $failureUsage.input_tokens + $failureUsage.cache_read_input_tokens + $failureUsage.cache_creation_input_tokens + $failureUsage.output_tokens) } else { $null })
+    num_turns = $(if ($null -ne $data.num_turns) { [int]$data.num_turns } else { $null })
+    request_count = $(if ($null -ne $data.num_turns) { [int]$data.num_turns } else { $null })
+    requests = @()
+    provider_duration_ms = $null
+    wall_duration_ms = $null
+    actual_cost = $(if ($null -ne $data.total_cost_usd) { [decimal]$data.total_cost_usd } else { $null })
+    actual_cost_ticks = $(if ($null -ne $data.total_cost_usd_ticks) { [long]$data.total_cost_usd_ticks } else { $null })
+    models = $(if ($data.modelUsage) { @($data.modelUsage.PSObject.Properties.Name) } else { @() })
+    session_id = $null
+    stop_reason = $null
+  }
+}
+
 if ($UsageParseOnly) {
   if ([string]::IsNullOrWhiteSpace($UsageParseJsonPath) -or [string]::IsNullOrWhiteSpace($UsageParseTextPath)) {
     throw "UsageParseOnly requires UsageParseJsonPath and UsageParseTextPath."
   }
   Convert-QwenJsonOutput -JsonPath $UsageParseJsonPath -ErrorPath $UsageParseErrorPath -ProviderLedgerPath $UsageParseProviderLedgerPath -TextPath $UsageParseTextPath |
+    ConvertTo-Json -Compress -Depth 8
+  return
+}
+
+if ($GrokParseOnly) {
+  if ([string]::IsNullOrWhiteSpace($GrokParseJsonPath) -or [string]::IsNullOrWhiteSpace($GrokParseTextPath)) {
+    throw "GrokParseOnly requires GrokParseJsonPath and GrokParseTextPath."
+  }
+  Convert-GrokJsonOutput -JsonPath $GrokParseJsonPath -ErrorPath $GrokParseErrorPath -TextPath $GrokParseTextPath |
     ConvertTo-Json -Compress -Depth 8
   return
 }
@@ -418,6 +514,8 @@ $taskPath = Join-Path $runDir "task.txt"
 $resultPath = Join-Path $runDir "result.txt"
 $structuredResultPath = Join-Path $runDir "qwen-result.json"
 $qwenErrorPath = Join-Path $runDir "qwen-stderr.txt"
+$grokResultPath = Join-Path $runDir "grok-result.json"
+$grokErrorPath = Join-Path $runDir "grok-stderr.txt"
 $summaryPath = Join-Path $runDir "summary.txt"
 $metaPath = Join-Path $runDir "meta.txt"
 $workerResultPath = Join-Path $runDir "worker-result.json"
@@ -460,7 +558,8 @@ $meta += "Cwd: $Cwd"
 $meta += "RunDir: $runDir"
 $meta += "Approval: $Approval"
 $meta += "Budget: $Budget"
-$meta += "Harness: qwen"
+$harnessName = $(if ($Worker -eq "grok") { "grok-build" } else { "qwen" })
+$meta += "Harness: $harnessName"
 $meta += "MaxWallTime: $MaxWallTime"
 $meta += "MaxSessionTurns: $MaxSessionTurns"
 $meta += "AllowedPath: $($AllowedPath -join ', ')"
@@ -470,6 +569,7 @@ $workerExitCode = $null
 $workerError = ""
 $selectedModel = ""
 $qwenMetrics = $null
+$grokMetrics = $null
 $workerStartedAt = Get-Date
 if ($Approval -eq "yolo") {
   $env:QWEN_CODE_SUPPRESS_YOLO_WARNING = "1"
@@ -620,6 +720,99 @@ try {
       $workerError = $qwenMetrics.error_message
     }
   }
+
+  if ($Worker -eq "grok") {
+    $grokCommand = Get-Command grok -ErrorAction SilentlyContinue
+    if (-not $grokCommand) {
+      $grokFallback = Join-Path $env:USERPROFILE ".grok\bin\grok.exe"
+      if (Test-Path -LiteralPath $grokFallback -PathType Leaf) {
+        $grokCommand = Get-Item -LiteralPath $grokFallback
+      }
+    }
+    if (-not $grokCommand) {
+      throw "Official Grok Build CLI was not found. Install it from https://docs.x.ai/build/cli/installation."
+    }
+    $grokExecutable = $(if ($grokCommand.Source) { $grokCommand.Source } elseif ($grokCommand.Path) { $grokCommand.Path } else { $grokCommand.FullName })
+
+    $selectedModel = "grok-build-auto"
+    $grokArgs = @(
+      "--no-auto-update",
+      "--prompt-file", $promptPath,
+      "--cwd", $Cwd,
+      "--output-format", "json",
+      "--max-turns", ([string]$MaxSessionTurns),
+      "--no-subagents",
+      "--no-memory",
+      "--disable-web-search",
+      "--sandbox", "workspace",
+      "--no-plan"
+    )
+    if ($Approval -eq "yolo") {
+      $grokArgs += "--always-approve"
+    } else {
+      $grokArgs += @("--permission-mode", "dontAsk")
+    }
+
+    # Account auth is the default so a free Grok Build allowance cannot
+    # silently fall through to paid API billing. API-key auth must be chosen
+    # explicitly by the caller.
+    $previousXaiKey = [Environment]::GetEnvironmentVariable("XAI_API_KEY", "Process")
+    $previousHttpProxy = [Environment]::GetEnvironmentVariable("HTTP_PROXY", "Process")
+    $previousHttpsProxy = [Environment]::GetEnvironmentVariable("HTTPS_PROXY", "Process")
+    $grokIsolationEnv = @(
+      "GROK_CURSOR_SKILLS_ENABLED",
+      "GROK_CLAUDE_SKILLS_ENABLED",
+      "GROK_CURSOR_MCPS_ENABLED",
+      "GROK_CLAUDE_MCPS_ENABLED"
+    )
+    $previousGrokIsolationEnv = @{}
+    try {
+      foreach ($name in $grokIsolationEnv) {
+        $previousGrokIsolationEnv[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
+        [Environment]::SetEnvironmentVariable($name, "false", "Process")
+      }
+      if ($GrokBuildAuth -eq "account") {
+        [Environment]::SetEnvironmentVariable("XAI_API_KEY", $null, "Process")
+      } else {
+        $grokApiKey = Get-EnvValue "XAI_API_KEY"
+        if ([string]::IsNullOrWhiteSpace($grokApiKey)) {
+          throw "Grok Build api_key auth was selected, but XAI_API_KEY is not configured."
+        }
+        [Environment]::SetEnvironmentVariable("XAI_API_KEY", $grokApiKey, "Process")
+      }
+
+      $trustedProxy = Get-EnvValue "AI_TEAM_TRUSTED_PROXY_URL"
+      if (-not [string]::IsNullOrWhiteSpace($trustedProxy)) {
+        if ([string]::IsNullOrWhiteSpace($env:HTTP_PROXY)) { $env:HTTP_PROXY = $trustedProxy }
+        if ([string]::IsNullOrWhiteSpace($env:HTTPS_PROXY)) { $env:HTTPS_PROXY = $trustedProxy }
+      }
+
+      $previousErrorAction = $ErrorActionPreference
+      try {
+        $ErrorActionPreference = "Continue"
+        & $grokExecutable @grokArgs 1> $grokResultPath 2> $grokErrorPath
+        $workerExitCode = $LASTEXITCODE
+      } finally {
+        $ErrorActionPreference = $previousErrorAction
+      }
+    } finally {
+      [Environment]::SetEnvironmentVariable("XAI_API_KEY", $previousXaiKey, "Process")
+      [Environment]::SetEnvironmentVariable("HTTP_PROXY", $previousHttpProxy, "Process")
+      [Environment]::SetEnvironmentVariable("HTTPS_PROXY", $previousHttpsProxy, "Process")
+      foreach ($name in $grokIsolationEnv) {
+        [Environment]::SetEnvironmentVariable($name, $previousGrokIsolationEnv[$name], "Process")
+      }
+    }
+
+    $grokMetrics = Convert-GrokJsonOutput -JsonPath $grokResultPath -ErrorPath $grokErrorPath -TextPath $resultPath
+    if ($grokMetrics -and @($grokMetrics.models).Count -gt 0) {
+      $selectedModel = (@($grokMetrics.models) -join ",")
+    }
+    if (-not $grokMetrics -or -not $grokMetrics.parsed -or $grokMetrics.is_error) {
+      if ($workerExitCode -eq 0) { $workerExitCode = 1 }
+      $workerError = $(if ($grokMetrics) { $grokMetrics.error_message } else { "Grok Build structured output could not be parsed." })
+    }
+  }
 } catch {
   $workerExitCode = 1
   $workerError = $_.Exception.Message
@@ -687,41 +880,49 @@ try {
 }
 
 $workerStatus = $(if ($workerExitCode -eq 0) { "success" } else { "failed" })
+$workerMetrics = $(if ($Worker -eq "grok") { $grokMetrics } else { $qwenMetrics })
+$structuredArtifact = $(if ($Worker -eq "grok") { $grokResultPath } else { $structuredResultPath })
+$stderrArtifact = $(if ($Worker -eq "grok") { $grokErrorPath } else { $qwenErrorPath })
 $workerResult = [ordered]@{
   schema_version = "1.0"
   task_id = $TaskId
   task = $Task
   attempt = $Attempt
   worker = $Worker
-  harness = "qwen"
+  harness = $harnessName
   model = $selectedModel
   budget = $Budget
   status = $workerStatus
   exit_code = $workerExitCode
   error = $workerError
   summary = $summaryText
-  usage = $(if ($qwenMetrics) { [ordered]@{
-    availability = $qwenMetrics.availability
-    reason = $qwenMetrics.availability_reason
-    input_tokens = $qwenMetrics.input_tokens
-    output_tokens = $qwenMetrics.output_tokens
-    cache_read_tokens = $qwenMetrics.cache_read_tokens
-    uncached_input_tokens = $qwenMetrics.uncached_input_tokens
-    thinking_tokens = $qwenMetrics.thinking_tokens
-    total_tokens = $qwenMetrics.total_tokens
-    num_turns = $qwenMetrics.num_turns
-    request_count = $qwenMetrics.request_count
-    provider_duration_ms = $qwenMetrics.provider_duration_ms
-    wall_duration_ms = $qwenMetrics.wall_duration_ms
-    requests = @($qwenMetrics.requests)
+  usage = $(if ($workerMetrics) { [ordered]@{
+    availability = $workerMetrics.availability
+    reason = $workerMetrics.availability_reason
+    input_tokens = $workerMetrics.input_tokens
+    output_tokens = $workerMetrics.output_tokens
+    cache_read_tokens = $workerMetrics.cache_read_tokens
+    cache_creation_tokens = $(if ($null -ne $workerMetrics.cache_creation_tokens) { $workerMetrics.cache_creation_tokens } else { $null })
+    uncached_input_tokens = $workerMetrics.uncached_input_tokens
+    thinking_tokens = $workerMetrics.thinking_tokens
+    total_tokens = $workerMetrics.total_tokens
+    num_turns = $workerMetrics.num_turns
+    request_count = $workerMetrics.request_count
+    provider_duration_ms = $workerMetrics.provider_duration_ms
+    wall_duration_ms = $workerMetrics.wall_duration_ms
+    actual_cost = $(if ($null -ne $workerMetrics.actual_cost) { $workerMetrics.actual_cost } else { $null })
+    actual_cost_ticks = $(if ($null -ne $workerMetrics.actual_cost_ticks) { $workerMetrics.actual_cost_ticks } else { $null })
+    session_id = $(if ($null -ne $workerMetrics.session_id) { $workerMetrics.session_id } else { $null })
+    stop_reason = $(if ($null -ne $workerMetrics.stop_reason) { $workerMetrics.stop_reason } else { $null })
+    requests = @($workerMetrics.requests)
   } } else { $null })
   changed_files = @($changedFiles)
   allowed_paths = @($AllowedPath)
   artifacts = [ordered]@{
     run_dir = $runDir
     full_result = $resultPath
-    structured_result = $(if (Test-Path -LiteralPath $structuredResultPath) { $structuredResultPath } else { $null })
-    stderr = $(if (Test-Path -LiteralPath $qwenErrorPath) { $qwenErrorPath } else { $null })
+    structured_result = $(if (Test-Path -LiteralPath $structuredArtifact) { $structuredArtifact } else { $null })
+    stderr = $(if (Test-Path -LiteralPath $stderrArtifact) { $stderrArtifact } else { $null })
     summary = $summaryPath
     metadata = $metaPath
     worker_result = $workerResultPath
@@ -730,7 +931,7 @@ $workerResult = [ordered]@{
 $workerResult | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $workerResultPath -Encoding UTF8
 
 $workerEndedAt = Get-Date
-$estimatedCostCny = Get-EstimatedCostCny -Provider $Worker -Model $selectedModel -Metrics $qwenMetrics
+$estimatedCostCny = $(if ($Worker -eq "grok") { $null } else { Get-EstimatedCostCny -Provider $Worker -Model $selectedModel -Metrics $workerMetrics })
 $usageDir = Split-Path -Parent $UsageLedger
 if ($usageDir) { New-Item -ItemType Directory -Force -Path $usageDir | Out-Null }
 $ledgerEvent = [ordered]@{
@@ -742,22 +943,24 @@ $ledgerEvent = [ordered]@{
   budget = $Budget
   success = ($workerStatus -eq "success")
   latency_ms = [math]::Round(($workerEndedAt - $workerStartedAt).TotalMilliseconds)
-  usage_availability = $(if ($qwenMetrics) { $qwenMetrics.availability } else { "unavailable" })
-  usage_reason = $(if ($qwenMetrics) { $qwenMetrics.availability_reason } else { "Selected CLI harness did not expose structured usage." })
-  input_tokens = $(if ($qwenMetrics) { $qwenMetrics.input_tokens } else { $null })
-  output_tokens = $(if ($qwenMetrics) { $qwenMetrics.output_tokens } else { $null })
-  cache_read_tokens = $(if ($qwenMetrics) { $qwenMetrics.cache_read_tokens } else { $null })
-  uncached_input_tokens = $(if ($qwenMetrics) { $qwenMetrics.uncached_input_tokens } else { $null })
-  thinking_tokens = $(if ($qwenMetrics) { $qwenMetrics.thinking_tokens } else { $null })
-  total_tokens = $(if ($qwenMetrics) { $qwenMetrics.total_tokens } else { $null })
-  num_turns = $(if ($qwenMetrics) { $qwenMetrics.num_turns } else { $null })
-  request_count = $(if ($qwenMetrics) { $qwenMetrics.request_count } else { $null })
-  provider_duration_ms = $(if ($qwenMetrics) { $qwenMetrics.provider_duration_ms } else { $null })
-  requests = $(if ($qwenMetrics) { @($qwenMetrics.requests) } else { @() })
-  actual_cost = $null
+  usage_availability = $(if ($workerMetrics) { $workerMetrics.availability } else { "unavailable" })
+  usage_reason = $(if ($workerMetrics) { $workerMetrics.availability_reason } else { "Selected CLI harness did not expose structured usage." })
+  input_tokens = $(if ($workerMetrics) { $workerMetrics.input_tokens } else { $null })
+  output_tokens = $(if ($workerMetrics) { $workerMetrics.output_tokens } else { $null })
+  cache_read_tokens = $(if ($workerMetrics) { $workerMetrics.cache_read_tokens } else { $null })
+  cache_creation_tokens = $(if ($workerMetrics -and $null -ne $workerMetrics.cache_creation_tokens) { $workerMetrics.cache_creation_tokens } else { $null })
+  uncached_input_tokens = $(if ($workerMetrics) { $workerMetrics.uncached_input_tokens } else { $null })
+  thinking_tokens = $(if ($workerMetrics) { $workerMetrics.thinking_tokens } else { $null })
+  total_tokens = $(if ($workerMetrics) { $workerMetrics.total_tokens } else { $null })
+  num_turns = $(if ($workerMetrics) { $workerMetrics.num_turns } else { $null })
+  request_count = $(if ($workerMetrics) { $workerMetrics.request_count } else { $null })
+  provider_duration_ms = $(if ($workerMetrics) { $workerMetrics.provider_duration_ms } else { $null })
+  requests = $(if ($workerMetrics) { @($workerMetrics.requests) } else { @() })
+  actual_cost = $(if ($workerMetrics -and $null -ne $workerMetrics.actual_cost) { $workerMetrics.actual_cost } else { $null })
+  actual_cost_ticks = $(if ($workerMetrics -and $null -ne $workerMetrics.actual_cost_ticks) { $workerMetrics.actual_cost_ticks } else { $null })
   estimated_cost_cny = $estimatedCostCny
-  cost_note = $(if ($qwenMetrics -and $qwenMetrics.availability -eq "reported") { "Exact provider token usage; catalog estimate does not apply provider-specific cache discounts, and provider billing is authoritative" } elseif ($qwenMetrics -and $qwenMetrics.availability -eq "recovered") { "Usage recovered from provider records after failure; provider billing remains authoritative" } else { "CLI usage unavailable; no token or cost value was fabricated" })
-  harness = "qwen"
+  cost_note = $(if ($Worker -eq "grok" -and $workerMetrics -and $null -ne $workerMetrics.actual_cost) { "Grok Build CLI reported the cost; the account billing page remains authoritative" } elseif ($workerMetrics -and $workerMetrics.availability -eq "reported") { "Exact provider token usage; catalog estimate does not apply provider-specific cache discounts, and provider billing is authoritative" } elseif ($workerMetrics -and $workerMetrics.availability -eq "recovered") { "Usage recovered from provider records after failure; provider billing remains authoritative" } else { "CLI usage unavailable; no token or cost value was fabricated" })
+  harness = $harnessName
   worker_result = $workerResultPath
 }
 Add-Content -LiteralPath $UsageLedger -Value ($ledgerEvent | ConvertTo-Json -Compress) -Encoding UTF8

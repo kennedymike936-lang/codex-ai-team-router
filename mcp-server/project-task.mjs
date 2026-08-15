@@ -1,12 +1,15 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { access, readdir, stat } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { mechanicalInspect } from "./mechanical-inspector.mjs";
 import { planTaskTeam } from "./team-planner.mjs";
 import { buildTargetedRetryPrompt, selectScoutTurnPolicy, selectTurnPolicy } from "./turn-policy.mjs";
+import { commandExists } from "./doctor.mjs";
 
 const execFileAsync = promisify(execFile);
 const serverDir = dirname(fileURLToPath(import.meta.url));
@@ -329,6 +332,9 @@ export function classifyWorkerFailure(workerResult = {}) {
   if (workerResult?.status === "success") return { kind: "none", retryable: false };
   const text = [workerResult?.error, workerResult?.summary, workerResult?.message]
     .filter(Boolean).join("\n");
+  if (workerResult?.worker === "grok" && /\b(?:429|quota|credits? exhausted|free (?:allowance|tier).*exhausted|not logged in|login required|device auth|country not supported|region(?:al)?(?:ly)? unavailable)\b/i.test(text)) {
+    return { kind: "grok_account_or_quota", retryable: false };
+  }
   if (TERMINAL_WORKER_FAILURE.test(text)) return { kind: "configuration_or_safety", retryable: false };
   if (TURN_LIMIT_FAILURE.test(text)) return { kind: "turn_limit", retryable: true };
   if (TIMEOUT_FAILURE.test(text)) return { kind: "timeout", retryable: true };
@@ -338,6 +344,7 @@ export function classifyWorkerFailure(workerResult = {}) {
 }
 
 export function selectWorkerFailoverRoute(route = {}) {
+  if (route.worker === "grok") return { worker: "deepseek", harness: "qwen" };
   const worker = route.worker === "qwen" ? "qwen" : "deepseek";
   if (worker === "qwen") return { worker: "deepseek", harness: "qwen" };
   return { worker: "qwen", harness: "qwen" };
@@ -362,28 +369,53 @@ export function selectProjectMode(task = "", requested = "auto") {
   return INSPECTION_WORDS.test(String(task)) ? "inspect" : "implement";
 }
 
-export function selectProjectWorker(task = "", mode = "implement", preferred = "auto") {
+export function selectProjectWorker(task = "", mode = "implement", preferred = "auto", options = {}) {
   if (["qwen", "deepseek"].includes(preferred)) return preferred;
   if (mode === "inspect") return "qwen";
+  if (preferred === "grok") return options.grokAvailable ? "grok" : "deepseek";
   const text = String(task);
   if (DOCUMENT_WORDS.test(text) && !CODE_WORDS.test(text)) return "qwen";
+  const complexityLevel = typeof options.complexity === "string" ? options.complexity : options.complexity?.level;
+  if (options.grokAvailable && complexityLevel === "complex") return "grok";
   return "deepseek";
+}
+
+function enabledFlag(value) {
+  return /^(?:1|true|yes|on)$/i.test(String(value || "").trim());
+}
+
+export function grokBuildAvailable(args = {}) {
+  if (typeof args.grok_build_available === "boolean") return args.grok_build_available;
+  if (!enabledFlag(process.env.AI_TEAM_GROK_BUILD_ENABLED)) return false;
+  const cliAvailable = existsSync(join(homedir(), ".grok", "bin", process.platform === "win32" ? "grok.exe" : "grok"))
+    || commandExists("grok");
+  if (!cliAvailable) return false;
+  const authMode = String(process.env.AI_TEAM_GROK_BUILD_AUTH || "account").trim().toLowerCase();
+  if (authMode === "api_key") return Boolean(String(process.env.XAI_API_KEY || "").trim());
+  // Existence only: never read, copy, log, or send the official CLI's session.
+  return existsSync(join(homedir(), ".grok", "auth.json"));
 }
 
 export function previewProjectTask(args = {}) {
   const mode = selectProjectMode(args.task, args.mode);
-  const worker = selectProjectWorker(args.task, mode, args.preferred);
   const team = planTaskTeam({
     task: args.task,
     context: args.context,
     allowedPaths: args.allowed_paths,
     maxAssistants: args.max_assistants,
   });
+  const grokAvailable = grokBuildAvailable(args);
+  const worker = selectProjectWorker(args.task, mode, args.preferred, {
+    complexity: team.complexity,
+    grokAvailable,
+  });
   const planner = worker === "qwen" ? "deepseek" : "qwen";
   return {
     dry_run: true,
     mode,
     worker,
+    grok_build_available: grokAvailable,
+    grok_build_auth: String(process.env.AI_TEAM_GROK_BUILD_AUTH || "account").toLowerCase() === "api_key" ? "api_key" : "account",
     planner: team.use_planner ? planner : null,
     complexity: team.complexity,
     team: {
@@ -462,7 +494,7 @@ export async function runProjectTask(args = {}) {
     const workers = preview.team.coding_assistants >= 2
       ? [preview.worker, preview.planner]
       : [preview.worker];
-    const initialRoutes = workers.map((worker) => ({ worker, harness: "qwen" }));
+    const initialRoutes = workers.map((worker) => ({ worker, harness: worker === "grok" ? "grok-build" : "qwen" }));
     const settled = await Promise.allSettled(initialRoutes.map((route) => runScout({
       task: args.task,
       taskId,
@@ -575,7 +607,7 @@ export async function runProjectTask(args = {}) {
     const workerScript = await resolveScript("codex-worker.ps1");
     const gateScript = preview.run_gate ? await resolveScript("codex-gate.ps1") : null;
     let retryTask = "";
-    let currentRoute = { worker: preview.worker, harness: "qwen" };
+    let currentRoute = { worker: preview.worker, harness: preview.worker === "grok" ? "grok-build" : "qwen" };
 
     for (let attempt = initialAttempt; attempt <= finalAttempt; attempt += 1) {
       const attemptIndex = attempt - initialAttempt;
@@ -597,6 +629,9 @@ export async function runProjectTask(args = {}) {
         "-AllowedPathJson", allowedJson,
         "-JsonOnly",
       ];
+      if (currentRoute.worker === "grok") {
+        workerArgs.push("-GrokBuildAuth", preview.grok_build_auth);
+      }
       try {
         const workerExecution = await runPowerShell(workerScript, workerArgs, attemptTimeoutSeconds * 1000);
         workerResult = parseJsonOutput(workerExecution.stdout, "Project worker");

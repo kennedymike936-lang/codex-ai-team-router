@@ -32,6 +32,20 @@ test("routes implementation to one DeepSeek worker by default", () => {
   assert.equal(selectProjectWorker("Fix the TypeScript build", "implement"), "deepseek");
 });
 
+test("routes only complex implementation to an available Grok Build worker", () => {
+  const task = "Build a production-ready full-stack system and redesign its architecture across frontend, backend, database, security, tests, and deployment.";
+  const available = previewProjectTask({ task, mode: "implement", grok_build_available: true });
+  assert.equal(available.complexity.level, "complex");
+  assert.equal(available.worker, "grok");
+  assert.equal(available.grok_build_available, true);
+  assert.equal(available.planner, "qwen");
+
+  const unavailable = previewProjectTask({ task, mode: "implement", preferred: "grok", grok_build_available: false });
+  assert.equal(unavailable.worker, "deepseek");
+  const inspect = previewProjectTask({ task: `Inspect ${task}`, mode: "inspect", preferred: "grok", grok_build_available: true });
+  assert.equal(inspect.worker, "qwen");
+});
+
 test("uses one noninteractive worker plus a deterministic gate", () => {
   const preview = previewProjectTask({ task: "Implement the feature", approval: "auto" });
   assert.equal(preview.mode, "implement");
@@ -88,6 +102,13 @@ test("classifies retryable helper failures without bypassing configuration error
   assert.deepEqual(selectWorkerFailoverRoute({ worker: "qwen", harness: "qwen" }), {
     worker: "deepseek", harness: "qwen",
   });
+  assert.deepEqual(selectWorkerFailoverRoute({ worker: "grok", harness: "grok-build" }), {
+    worker: "deepseek", harness: "qwen",
+  });
+  assert.deepEqual(
+    classifyWorkerFailure({ worker: "grok", status: "failed", error: "429 free allowance exhausted" }),
+    { kind: "grok_account_or_quota", retryable: false },
+  );
   const task = buildWorkerFailoverTask(
     {
       summary: "partial inspection",
