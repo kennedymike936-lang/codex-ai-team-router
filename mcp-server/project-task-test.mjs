@@ -81,18 +81,28 @@ test("classifies retryable helper failures without bypassing configuration error
     classifyWorkerFailure({ status: "failed", error: "401 Unauthorized: API key is not configured" }),
     { kind: "configuration_or_safety", retryable: false },
   );
+  assert.deepEqual(
+    classifyWorkerFailure({ status: "failed", error: "Warning: no stdin data received in 3s" }),
+    { kind: "harness_stdin", retryable: true },
+  );
   assert.deepEqual(selectWorkerFailoverRoute({ worker: "qwen", harness: "qwen" }), {
-    worker: "deepseek", harness: "claude",
+    worker: "deepseek", harness: "qwen",
   });
   const task = buildWorkerFailoverTask(
-    { summary: "partial inspection" },
+    {
+      summary: "partial inspection",
+      changed_files: ["locales/one.reds"],
+      allowed_paths: ["locales/one.reds", "locales/two.reds"],
+    },
     { kind: "turn_limit" },
     { worker: "qwen", harness: "qwen" },
-    { worker: "deepseek", harness: "claude" },
+    { worker: "deepseek", harness: "qwen" },
   );
   assert.match(task, /attempt 2 of 2/i);
   assert.match(task, /do not repeat broad discovery/i);
-  assert.match(task, /deepseek\/claude/i);
+  assert.match(task, /deepseek\/qwen/i);
+  assert.match(task, /locales\/one\.reds/);
+  assert.match(task, /compar(?:e|ing).*current workspace diff/i);
 });
 
 test("reserves the MCP deadline across planner, retries, and gates", () => {
@@ -110,6 +120,20 @@ test("reserves the MCP deadline across planner, retries, and gates", () => {
   assert.ok(deadline.allocated_seconds <= deadline.safe_total_seconds);
   assert.ok(deadline.safe_total_seconds < deadline.outer_timeout_seconds);
   assert.ok(deadline.attempt_timeout_seconds[0] > deadline.attempt_timeout_seconds[1]);
+  assert.ok(deadline.attempt_timeout_seconds[1] <= 45);
+});
+
+test("gives the first large worker enough time to finish one provider response", () => {
+  const deadline = computeProjectDeadline({
+    requestedMinutes: 12,
+    mode: "implement",
+    hasPlanner: false,
+    runGate: true,
+    initialAttempt: 1,
+    mcpTimeoutSeconds: 300,
+  });
+  assert.deepEqual(deadline.attempt_timeout_seconds, [190, 45]);
+  assert.deepEqual(deadline.max_wall_time_seconds, [182, 37]);
 });
 
 test("keeps focused scouts cheap and marks unavailable usage explicitly", () => {
@@ -276,7 +300,7 @@ $score = $(if ($Attempt -eq 1) { 85 } else { 95 })
   }
 });
 
-test("project_task switches once from a turn-limited Qwen scout to an independent DeepSeek harness", async () => {
+test("project_task switches once from a turn-limited Qwen scout to DeepSeek on the isolated Qwen harness", async () => {
   const root = await mkdtemp(join(tmpdir(), "ai-team-failover-"));
   const cwd = join(root, "workspace");
   const scripts = join(root, "scripts");
@@ -284,7 +308,7 @@ test("project_task switches once from a turn-limited Qwen scout to an independen
   await mkdir(cwd);
   await mkdir(scripts);
   const scoutScript = String.raw`param(
-  [string]$Task, [string]$Cwd, [string]$Worker, [string]$DeepSeekHarness,
+  [string]$Task, [string]$TaskId, [string]$Cwd, [string]$Worker,
   [string]$Budget, [string]$MaxWallTime, [int]$MaxSessionTurns,
   [int]$SummaryMaxChars, [switch]$JsonOnly
 )
@@ -292,14 +316,16 @@ $failed = $Worker -eq "qwen"
 [ordered]@{
   status = $(if ($failed) { "failed" } else { "success" })
   worker = $Worker
-  harness = $(if ($Worker -eq "deepseek") { $DeepSeekHarness } else { "qwen" })
+  harness = "qwen"
   model = "fake-$Worker"
   error = $(if ($failed) { "FatalTurnLimitedError: Reached max session turns" } else { "" })
   summary = $(if ($failed) { "Reached max session turns" } else { "fallback inspection complete" })
   usage = [ordered]@{ input_tokens = 4; output_tokens = 2; total_tokens = 6; num_turns = 1 }
   changed_files = @()
   scout_pack = [ordered]@{ enabled = $false; reason = "fixture"; char_count = 0; max_chars = 1000; truncated = $false; file_count = 0; match_count = 0; elapsed_ms = 0; wrapper_elapsed_ms = 1 }
-  artifacts = [ordered]@{ run_dir = "fake-$Worker-$DeepSeekHarness"; worker_result = ""; full_result = "" }
+  task_id = $TaskId
+  artifacts = [ordered]@{ run_dir = "fake-$TaskId-$Worker-qwen"; worker_result = ""; full_result = "" }
+  received_task_id = $TaskId
 } | ConvertTo-Json -Depth 5 -Compress
 `;
 
@@ -319,10 +345,69 @@ $failed = $Worker -eq "qwen"
     assert.equal(result.attempts.length, 2);
     assert.deepEqual(result.route_history, [
       { attempt: 1, worker: "qwen", harness: "qwen", failure_kind: "turn_limit" },
-      { attempt: 2, worker: "deepseek", harness: "claude", failure_kind: "none" },
+      { attempt: 2, worker: "deepseek", harness: "qwen", failure_kind: "none" },
     ]);
-    assert.deepEqual(result.attempts[0].failover_to, { worker: "deepseek", harness: "claude" });
+    assert.deepEqual(result.attempts[0].failover_to, { worker: "deepseek", harness: "qwen" });
     assert.match(result.summary, /fallback inspection complete/);
+    assert.equal(result.artifacts.team_runs.length, 2);
+    assert.ok(result.artifacts.team_runs.every((run) => run.includes(result.task_id)));
+    assert.equal(result.turn_policy.first_attempt.max_session_turns, 4);
+    assert.equal(result.turn_policy.targeted_retry.max_session_turns, 4);
+  } finally {
+    if (previousScriptRoot === undefined) delete process.env.AI_TEAM_SCRIPT_ROOT;
+    else process.env.AI_TEAM_SCRIPT_ROOT = previousScriptRoot;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("project_task recovers a structured partial handoff from a nonzero PowerShell exit", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ai-team-nonzero-handoff-"));
+  const cwd = join(root, "workspace");
+  const scripts = join(root, "scripts");
+  const previousScriptRoot = process.env.AI_TEAM_SCRIPT_ROOT;
+  await mkdir(cwd);
+  await mkdir(scripts);
+  const workerScript = String.raw`param(
+  [string]$Worker, [string]$Task, [string]$Cwd, [string]$TaskId, [int]$Attempt,
+  [string]$Approval, [string]$Budget, [string]$MaxWallTime, [int]$MaxSessionTurns,
+  [int]$SummaryMaxChars, [string]$AllowedPathJson, [switch]$JsonOnly
+)
+$partial = Join-Path $Cwd "partial.txt"
+if ($Attempt -eq 1) { "useful" | Set-Content -LiteralPath $partial -Encoding UTF8 }
+[ordered]@{
+  status = $(if ($Attempt -eq 1) { "failed" } else { "success" })
+  worker = $Worker
+  harness = "qwen"
+  model = "fake-$Worker"
+  error = $(if ($Attempt -eq 1) { "wall-clock timeout with partial output" } else { "" })
+  summary = $(if ($Attempt -eq 1) { "timed out after preserving partial.txt" } else { "fallback preserved and completed partial.txt" })
+  usage = [ordered]@{ input_tokens = 10; output_tokens = 2; total_tokens = 12; num_turns = 1 }
+  changed_files = @("partial.txt")
+  allowed_paths = @("partial.txt")
+  artifacts = [ordered]@{ run_dir = "fake-$Attempt"; worker_result = "fake-worker-result.json"; full_result = "fake-result.txt" }
+} | ConvertTo-Json -Depth 5 -Compress
+if ($Attempt -eq 1) { exit 55 }
+`;
+
+  try {
+    await writeFile(join(scripts, "codex-worker.ps1"), workerScript, "utf8");
+    process.env.AI_TEAM_SCRIPT_ROOT = scripts;
+    const result = await runProjectTask({
+      cwd,
+      task: "Implement the bounded timeout recovery fixture",
+      mode: "implement",
+      preferred: "qwen",
+      max_assistants: 1,
+      max_minutes: 1,
+      allowed_paths: ["partial.txt"],
+      run_gate: false,
+    });
+    assert.equal(result.status, "success");
+    assert.equal(result.attempts.length, 2);
+    assert.equal(result.attempts[0].failure_kind, "timeout");
+    assert.deepEqual(result.attempts[0].failover_to, { worker: "deepseek", harness: "qwen" });
+    assert.deepEqual(result.changed_files, ["partial.txt"]);
+    assert.equal(result.usage.total_tokens, 24);
     assert.equal(result.artifacts.team_runs.length, 2);
   } finally {
     if (previousScriptRoot === undefined) delete process.env.AI_TEAM_SCRIPT_ROOT;

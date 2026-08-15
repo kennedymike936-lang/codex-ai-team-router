@@ -7,10 +7,34 @@ All notable changes to this project will be documented here. The format follows 
 ### Added
 
 - One bounded assistant/harness failover for local `project_task` turn limits, timeouts, transient provider failures, process failures, and malformed structured output.
+- Extensible Provider Registry with native Gemini REST, native OpenAI Responses, and administrator-configured generic OpenAI-compatible adapters.
+- Opt-in SiliconFlow adapter with conservative pricing, privacy, data-boundary, and content-policy metadata.
+- Normalized provider protocol, text, tool calls, finish reason, and token usage in `budget_route` results.
+- Structured network diagnostics, bounded safe retries, trusted HTTP/HTTPS proxy fallback, and assistant failover for pre-connect failures.
+- Exact run-local Qwen request accounting, including cached versus uncached input, thinking tokens, provider API time, and per-request breakdowns after partial or timed-out runs.
+- Read-only `doctor` diagnostics for local runtimes, AI harness commands, provider credential presence, and trusted proxy presence without exposing credential or proxy values.
+- A read-only Windows trusted-proxy health check that tests the user-configured local proxy without reading subscriptions, discovering public proxies, switching nodes, or bypassing TLS.
+
+### Changed
+
+- Large-output workers receive an explicit wall-clock stop policy, a longer primary completion window, and a narrower focused fallback window.
+- Worker failover preserves completed partial files and identifies remaining scope from the allowed paths and current workspace diff.
+- `project_task` recovers structured partial handoffs from nonzero PowerShell exits so timed-out workers retain changed files, exact usage, and the correct failover classification.
+
+### Fixed
+
+- DeepSeek's Claude-compatible harness now receives the worker task through explicit text stdin instead of a long positional argument, preventing the Windows three-second stdin initialization failure.
+- Isolated Qwen workers now create their own minimal settings file and use a stable prompt file, avoiding inherited configuration noise and command-line truncation.
+- Read-only Scouts now use a bounded mechanical preflight by default and receive 4/5/7-turn budgets with an explicit tool-free final answer turn.
+- DeepSeek workers now always use the isolated Qwen Code OpenAI-compatible harness, removing the unavailable Claude compatibility path and accepting `DEEPSEEK_API_KEY` directly.
+- The parent `project_task` ID now propagates through Planner, Scout, Worker, usage, and Gate artifacts for end-to-end auditability.
 
 ### Security
 
 - Authentication, permission, API-key configuration, path-scope, and secret-policy failures stop immediately instead of switching assistants.
+- Gemini unpaid/free candidates are not treated as zero-data-retention, and provider Base URLs cannot be supplied by task input.
+- SiliconFlow is excluded from privacy-sensitive and policy-sensitive tasks and is never inferred to be a direct connection to its hosted model vendor.
+- Public proxy discovery, TLS verification bypass, proxy credential disclosure, and uncertain paid-POST replay are explicitly prohibited.
 
 ## [0.7.0] - 2026-08-11
 

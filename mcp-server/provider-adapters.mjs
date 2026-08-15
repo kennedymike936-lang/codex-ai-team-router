@@ -1,5 +1,8 @@
 export const OPENROUTER_DEFAULT_BASE = "https://openrouter.ai/api/v1";
 export const GROQ_DEFAULT_BASE = "https://api.groq.com/openai/v1";
+export const GEMINI_DEFAULT_BASE = "https://generativelanguage.googleapis.com/v1beta";
+export const OPENAI_DEFAULT_BASE = "https://api.openai.com/v1";
+export const SILICONFLOW_DEFAULT_BASE = "https://api.siliconflow.cn/v1";
 
 function headerValue(headers, name) {
   if (!headers) return null;
@@ -24,14 +27,14 @@ export function redactKeys(text, secrets = []) {
   }
   return value
     .replace(/(authorization\s*:\s*bearer\s+|bearer\s+)[^\s,;"')\]}]+/gi, "$1***REDACTED***")
-    .replace(/\b(?:sk-or-|gsk_)[A-Za-z0-9._-]+\b/gi, "***REDACTED***");
+    .replace(/\b(?:sk-|gsk_|AIza|AQ\.)[A-Za-z0-9._-]+\b/gi, "***REDACTED***");
 }
 
 export function redactHeaders(headers) {
   if (!headers) return headers;
   const safe = {};
   for (const [key, value] of Object.entries(headers)) {
-    safe[key] = ["authorization", "x-api-key"].includes(key.toLowerCase())
+    safe[key] = ["authorization", "x-api-key", "x-goog-api-key"].includes(key.toLowerCase())
       ? "***REDACTED***"
       : String(value);
   }
@@ -89,7 +92,6 @@ export function normalizeOpenRouterModel(raw, override = {}) {
   if (supported.some((item) => ["tools", "tool_choice", "functions"].includes(String(item).toLowerCase()))) {
     common.capabilities = normalizedCapabilities(common.capabilities, ["tools"]);
   }
-
   return {
     id: raw.id,
     provider: "openrouter",
@@ -108,8 +110,6 @@ export function normalizeOpenRouterModel(raw, override = {}) {
   };
 }
 
-// This intentionally small catalog contains only capabilities explicitly exposed by
-// Groq systems. Users can extend or replace it through router metadata overrides.
 export const GROQ_CAPABILITY_CATALOG = {
   "groq/compound": { capabilities: ["code", "tools", "web"] },
   "groq/compound-mini": { capabilities: ["code", "tools", "web"] },
@@ -149,7 +149,62 @@ export function normalizeGroqModel(raw, override = {}, capabilityCatalog = {}) {
   };
 }
 
-function providerHeaders(apiKey) {
+export function normalizeOpenAiCompatibleModel(raw, override = {}, _catalog = {}, provider = "openai_compatible") {
+  if (!raw || typeof raw.id !== "string") return null;
+  const common = normalizeCommon(raw, override);
+  const pricing = parseObject(raw.pricing);
+  const inputPrice = optionalNumber(override.pricing?.input ?? pricing.input ?? pricing.prompt);
+  const outputPrice = optionalNumber(override.pricing?.output ?? pricing.output ?? pricing.completion);
+  return {
+    id: raw.id,
+    provider,
+    context_length: nonNegative(override.context_length ?? raw.context_length ?? raw.context_window),
+    architecture: raw.architecture && typeof raw.architecture === "object" ? { ...raw.architecture } : {},
+    pricing: { input: inputPrice, output: outputPrice },
+    supported_parameters: Array.isArray(raw.supported_parameters) ? [...raw.supported_parameters] : [],
+    is_free: override.is_free === true && inputPrice === 0 && outputPrice === 0,
+    is_zero_data_retention: override.is_zero_data_retention === true,
+    ...common,
+    raw,
+  };
+}
+
+export function normalizeSiliconFlowModel(raw, override = {}) {
+  const model = normalizeOpenAiCompatibleModel(raw, override, {}, "siliconflow");
+  if (!model) return null;
+  return {
+    ...model,
+    // Requests cross the SiliconFlow cloud boundary even when the model ID
+    // names Qwen, DeepSeek, or another upstream model family.
+    data_boundary: "siliconflow_cloud",
+    privacy_sensitive_task_policy: "deny",
+    content_policy: "restricted",
+    is_zero_data_retention: override.is_zero_data_retention === true,
+  };
+}
+
+export function normalizeGeminiModel(raw, override = {}) {
+  const name = typeof raw?.name === "string" ? raw.name.replace(/^models\//, "") : "";
+  if (!name) return null;
+  const inputPrice = optionalNumber(override.pricing?.input);
+  const outputPrice = optionalNumber(override.pricing?.output);
+  return {
+    id: name,
+    provider: "gemini",
+    context_length: nonNegative(override.context_length ?? raw.inputTokenLimit),
+    architecture: {},
+    pricing: { input: inputPrice, output: outputPrice },
+    supported_parameters: Array.isArray(raw.supportedGenerationMethods) ? [...raw.supportedGenerationMethods] : [],
+    is_free: override.is_free === true && inputPrice === 0 && outputPrice === 0,
+    // Gemini unpaid-service requests are not treated as ZDR. A deployment may
+    // override this only when its administrator has verified a different contract.
+    is_zero_data_retention: override.is_zero_data_retention === true,
+    ...normalizeCommon(raw, override),
+    raw,
+  };
+}
+
+function bearerHeaders(apiKey) {
   return apiKey ? { authorization: `Bearer ${apiKey}` } : {};
 }
 
@@ -165,50 +220,156 @@ export function parseRateLimitHeaders(headers) {
   };
 }
 
-function createAdapter({ provider, defaultBaseUrl, normalizeModel, safeFallbackStatuses, fetchImpl }) {
+function requireBaseUrl(baseUrl, provider) {
+  if (!String(baseUrl || "").trim()) throw new Error(`${provider} base URL is not configured.`);
+  return String(baseUrl).replace(/\/$/, "");
+}
+
+export function normalizeOpenAiResponse(json = {}) {
+  const message = json.choices?.[0]?.message || {};
+  return {
+    content: typeof message.content === "string" ? message.content : "",
+    tool_calls: Array.isArray(message.tool_calls) ? message.tool_calls : [],
+    finish_reason: json.choices?.[0]?.finish_reason || null,
+    usage: {
+      input_tokens: Number(json.usage?.prompt_tokens || json.usage?.input_tokens || 0),
+      output_tokens: Number(json.usage?.completion_tokens || json.usage?.output_tokens || 0),
+    },
+    raw: json,
+  };
+}
+
+function createOpenAiCompatibleAdapter({
+  provider,
+  defaultBaseUrl = "",
+  normalizeModel = (raw, override, catalog) => normalizeOpenAiCompatibleModel(raw, override, catalog, provider),
+  safeFallbackStatuses = new Set([429]),
+  modelListPath = "/models",
+  requiresApiKey = true,
+  fetchImpl = fetch,
+} = {}) {
   return {
     provider,
+    protocol: "openai_chat_completions",
+    requiresApiKey,
     fetchImpl,
 
     async discoverModels({ baseUrl = defaultBaseUrl, apiKey, metadata = {}, capabilityCatalog = {} } = {}) {
-      const response = await this.fetchImpl(`${baseUrl.replace(/\/$/, "")}/models`, {
-        headers: providerHeaders(apiKey),
-      });
+      const root = requireBaseUrl(baseUrl, provider);
+      const response = await this.fetchImpl(`${root}${modelListPath}`, { headers: bearerHeaders(apiKey) });
       if (!response.ok) {
         const body = await response.text();
         throw new Error(redactKeys(`${provider} model discovery failed (${response.status}): ${body.slice(0, 300)}`, [apiKey]));
       }
       const json = await response.json();
-      return (json.data || [])
-        .map((raw) => normalizeModel(raw, metadata[raw.id] || {}, capabilityCatalog))
-        .filter(Boolean);
+      return (json.data || []).map((raw) => normalizeModel(raw, metadata[raw.id] || {}, capabilityCatalog)).filter(Boolean);
     },
 
     async chatCompletion({ baseUrl = defaultBaseUrl, apiKey, messages, model, max_tokens, temperature = 0.2 }) {
-      const response = await this.fetchImpl(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
+      const root = requireBaseUrl(baseUrl, provider);
+      const response = await this.fetchImpl(`${root}/chat/completions`, {
         method: "POST",
-        headers: { "content-type": "application/json", ...providerHeaders(apiKey) },
+        headers: { "content-type": "application/json", ...bearerHeaders(apiKey) },
         body: JSON.stringify({ model, messages, max_tokens, temperature }),
       });
       return { response };
     },
 
-    isSafeFallbackStatus(status) {
-      return safeFallbackStatuses.has(Number(status)) || (Number(status) >= 500 && Number(status) <= 599);
+    parseResponse: normalizeOpenAiResponse,
+    isSafeFallbackStatus: (status) => safeFallbackStatuses.has(Number(status)) || (Number(status) >= 500 && Number(status) <= 599),
+    isAuthOrPermissionStop: (status) => Number(status) === 401 || Number(status) === 403,
+    parseHealthFromHeaders: parseRateLimitHeaders,
+  };
+}
+
+export function geminiContentsFromMessages(messages = []) {
+  const systemParts = [];
+  const contents = [];
+  for (const message of messages) {
+    const text = typeof message?.content === "string" ? message.content : "";
+    if (!text) continue;
+    if (message.role === "system") {
+      systemParts.push({ text });
+      continue;
+    }
+    contents.push({ role: message.role === "assistant" ? "model" : "user", parts: [{ text }] });
+  }
+  return {
+    contents,
+    ...(systemParts.length > 0 ? { systemInstruction: { parts: systemParts } } : {}),
+  };
+}
+
+export function normalizeGeminiResponse(json = {}) {
+  const candidate = json.candidates?.[0] || {};
+  const parts = Array.isArray(candidate.content?.parts) ? candidate.content.parts : [];
+  return {
+    content: parts.map((part) => typeof part.text === "string" ? part.text : "").filter(Boolean).join(""),
+    tool_calls: parts.filter((part) => part.functionCall).map((part, index) => ({
+      id: part.functionCall.id || `gemini-call-${index + 1}`,
+      type: "function",
+      function: {
+        name: part.functionCall.name || "",
+        arguments: JSON.stringify(part.functionCall.args || {}),
+      },
+    })),
+    finish_reason: candidate.finishReason || null,
+    usage: {
+      input_tokens: Number(json.usageMetadata?.promptTokenCount || 0),
+      output_tokens: Number(json.usageMetadata?.candidatesTokenCount || 0),
+    },
+    raw: json,
+  };
+}
+
+export function createGeminiAdapter(fetchImpl = fetch) {
+  return {
+    provider: "gemini",
+    protocol: "gemini_generate_content",
+    requiresApiKey: true,
+    fetchImpl,
+
+    async discoverModels({ baseUrl = GEMINI_DEFAULT_BASE, apiKey, metadata = {} } = {}) {
+      const root = requireBaseUrl(baseUrl, "gemini");
+      const response = await this.fetchImpl(`${root}/models?pageSize=1000`, { headers: { "x-goog-api-key": apiKey } });
+      if (!response.ok) {
+        const body = await response.text();
+        throw new Error(redactKeys(`gemini model discovery failed (${response.status}): ${body.slice(0, 300)}`, [apiKey]));
+      }
+      const json = await response.json();
+      return (json.models || [])
+        .filter((raw) => raw.supportedGenerationMethods?.includes("generateContent"))
+        .map((raw) => {
+          const id = String(raw.name || "").replace(/^models\//, "");
+          return normalizeGeminiModel(raw, metadata[id] || {});
+        })
+        .filter(Boolean);
     },
 
-    isAuthOrPermissionStop(status) {
-      return Number(status) === 401 || Number(status) === 403;
+    async chatCompletion({ baseUrl = GEMINI_DEFAULT_BASE, apiKey, messages, model, max_tokens, temperature = 0.2 }) {
+      const root = requireBaseUrl(baseUrl, "gemini");
+      const cleanModel = String(model || "").replace(/^models\//, "");
+      const converted = geminiContentsFromMessages(messages);
+      const response = await this.fetchImpl(`${root}/models/${encodeURIComponent(cleanModel)}:generateContent`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
+        body: JSON.stringify({
+          ...converted,
+          generationConfig: { maxOutputTokens: max_tokens, temperature },
+        }),
+      });
+      return { response };
     },
 
-    parseHealthFromHeaders(headers) {
-      return parseRateLimitHeaders(headers);
-    },
+    parseResponse: normalizeGeminiResponse,
+    isSafeFallbackStatus: (status) => Number(status) === 429 || (Number(status) >= 500 && Number(status) <= 599),
+    isAuthOrPermissionStop: (status) => Number(status) === 401 || Number(status) === 403,
+    parseHealthFromHeaders: parseRateLimitHeaders,
   };
 }
 
 export function createOpenRouterAdapter(fetchImpl = fetch) {
-  return createAdapter({
+  return createOpenAiCompatibleAdapter({
     provider: "openrouter",
     defaultBaseUrl: OPENROUTER_DEFAULT_BASE,
     normalizeModel: normalizeOpenRouterModel,
@@ -218,7 +379,7 @@ export function createOpenRouterAdapter(fetchImpl = fetch) {
 }
 
 export function createGroqAdapter(fetchImpl = fetch) {
-  return createAdapter({
+  return createOpenAiCompatibleAdapter({
     provider: "groq",
     defaultBaseUrl: GROQ_DEFAULT_BASE,
     normalizeModel: normalizeGroqModel,
@@ -227,8 +388,113 @@ export function createGroqAdapter(fetchImpl = fetch) {
   });
 }
 
+export function createGenericOpenAiAdapter(fetchImpl = fetch) {
+  return createOpenAiCompatibleAdapter({ provider: "openai_compatible", requiresApiKey: false, fetchImpl });
+}
+
+export function createSiliconFlowAdapter(fetchImpl = fetch) {
+  return createOpenAiCompatibleAdapter({
+    provider: "siliconflow",
+    defaultBaseUrl: SILICONFLOW_DEFAULT_BASE,
+    normalizeModel: normalizeSiliconFlowModel,
+    modelListPath: "/models?type=text&sub_type=chat",
+    safeFallbackStatuses: new Set([429]),
+    fetchImpl,
+  });
+}
+
+export function normalizeOpenAiResponsesModel(raw, override = {}) {
+  return normalizeOpenAiCompatibleModel(raw, override, {}, "openai");
+}
+
+export function normalizeOpenAiResponsesResponse(json = {}) {
+  const output = Array.isArray(json.output) ? json.output : [];
+  const messageText = output
+    .filter((item) => item?.type === "message")
+    .flatMap((item) => Array.isArray(item.content) ? item.content : [])
+    .map((part) => part?.type === "output_text" && typeof part.text === "string" ? part.text : "")
+    .filter(Boolean)
+    .join("");
+  return {
+    content: typeof json.output_text === "string" ? json.output_text : messageText,
+    tool_calls: output.filter((item) => item?.type === "function_call").map((item, index) => ({
+      id: item.call_id || item.id || `openai-call-${index + 1}`,
+      type: "function",
+      function: { name: item.name || "", arguments: item.arguments || "{}" },
+    })),
+    finish_reason: json.status || null,
+    usage: {
+      input_tokens: Number(json.usage?.input_tokens || 0),
+      output_tokens: Number(json.usage?.output_tokens || 0),
+    },
+    raw: json,
+  };
+}
+
+export function createOpenAiResponsesAdapter(fetchImpl = fetch) {
+  return {
+    provider: "openai",
+    protocol: "openai_responses",
+    requiresApiKey: true,
+    fetchImpl,
+
+    async discoverModels({ baseUrl = OPENAI_DEFAULT_BASE, apiKey, metadata = {} } = {}) {
+      const root = requireBaseUrl(baseUrl, "openai");
+      const response = await this.fetchImpl(`${root}/models`, { headers: bearerHeaders(apiKey) });
+      if (!response.ok) {
+        const body = await response.text();
+        throw new Error(redactKeys(`openai model discovery failed (${response.status}): ${body.slice(0, 300)}`, [apiKey]));
+      }
+      const json = await response.json();
+      return (json.data || [])
+        .map((raw) => normalizeOpenAiResponsesModel(raw, metadata[raw.id] || {}))
+        .filter(Boolean);
+    },
+
+    async chatCompletion({ baseUrl = OPENAI_DEFAULT_BASE, apiKey, messages, model, max_tokens }) {
+      const root = requireBaseUrl(baseUrl, "openai");
+      const input = (messages || []).map((message) => ({
+        role: message.role,
+        content: message.content,
+      }));
+      const response = await this.fetchImpl(`${root}/responses`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...bearerHeaders(apiKey) },
+        body: JSON.stringify({ model, input, max_output_tokens: max_tokens, store: false }),
+      });
+      return { response };
+    },
+
+    parseResponse: normalizeOpenAiResponsesResponse,
+    isSafeFallbackStatus: (status) => Number(status) === 429 || (Number(status) >= 500 && Number(status) <= 599),
+    isAuthOrPermissionStop: (status) => Number(status) === 401 || Number(status) === 403,
+    parseHealthFromHeaders: parseRateLimitHeaders,
+  };
+}
+
+const providerRegistry = new Map();
+
+export function registerProvider(provider, factory, { replace = false } = {}) {
+  const name = String(provider || "").trim().toLowerCase();
+  if (!name || typeof factory !== "function") throw new Error("Provider registration requires a name and factory.");
+  if (providerRegistry.has(name) && !replace) throw new Error(`Provider already registered: ${name}`);
+  providerRegistry.set(name, factory);
+}
+
+export function registeredProviders() {
+  return [...providerRegistry.keys()].sort();
+}
+
+registerProvider("openrouter", createOpenRouterAdapter);
+registerProvider("groq", createGroqAdapter);
+registerProvider("gemini", createGeminiAdapter);
+registerProvider("openai_compatible", createGenericOpenAiAdapter);
+registerProvider("openai", createOpenAiResponsesAdapter);
+registerProvider("siliconflow", createSiliconFlowAdapter);
+
 export function adapterForProvider(provider, fetchImpl) {
-  if (provider === "openrouter") return createOpenRouterAdapter(fetchImpl);
-  if (provider === "groq") return createGroqAdapter(fetchImpl);
-  throw new Error(`Unknown provider: ${provider}. Supported: openrouter, groq`);
+  const name = String(provider || "").trim().toLowerCase();
+  const factory = providerRegistry.get(name);
+  if (!factory) throw new Error(`Unknown provider: ${name}. Supported: ${registeredProviders().join(", ")}`);
+  return factory(fetchImpl);
 }

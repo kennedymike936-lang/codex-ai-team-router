@@ -41,11 +41,12 @@ flowchart LR
 
 ## 为什么只保留一个 MCP
 
-为每个模型各加载一套 MCP，会让每个 Codex 会话携带更多工具定义。本项目只保留一个 MCP，并暴露五个紧凑工具：
+为每个模型各加载一套 MCP，会让每个 Codex 会话携带更多工具定义。本项目只保留一个 MCP，并暴露六个紧凑工具：
 
 - `delegate_task`：处理不需要本地文件工具的问答、草稿和分析；按任务复杂度自动选择一个或两个代码 Worker，复杂且依赖实时资料时再加入 Grok。
 - `grok_search`：一次只读 Web Search 或 X Search，`source=auto` 时一般实时资讯走 Web、帖子和舆论走 X；默认限制一个服务端工具回合。
-- `budget_route`：在用户主动配置的 OpenRouter / Groq Key 范围内，按能力、已知价格、隐私、延迟、健康状态和剩余限额解释并选择模型；默认只预览。
+- `budget_route`：在用户主动配置的 OpenRouter、Groq、Gemini、OpenAI Responses 或管理员配置的 OpenAI-compatible 服务范围内，按能力、已知价格、隐私、延迟、健康状态和剩余限额解释并选择模型；默认只预览。
+- `doctor`：只读检查 Node、PowerShell、Git、Qwen 外壳、各 Provider 凭证是否存在，以及 MCP/Windows 系统代理是否配置；只返回布尔状态和安全建议，不读取或返回密钥、代理 URL 与凭证，也不发起模型调用。
 - `project_task`：把一整段本地侦查或实现交给自动扩编的 Qwen/DeepSeek 团队；实现后可自动运行确定性 Gate，只把交接包返回 Codex。
 - `worker_gate_review`：对结构化结果做确定性质量决策，也兼容原有的 diff 轻量审查。
 
@@ -63,14 +64,16 @@ flowchart LR
 - 三档输出预算：`low`、`normal`、`deep`。
 - MCP 返回结果有字符上限，避免异常长回复进入 Codex 上下文。
 - Worker 完整输出写入磁盘，默认仅返回最多 30 行 / 3000 字符摘要。
-- 只读 Scout 默认最多 4 个 agent 回合；实现 Worker 默认最多 8 个回合。
+- 只读 Scout 按任务复杂度使用 3 / 4 / 6 个 agent 回合，并预留最终结论轮；实现 Worker 由独立复杂度策略控制且不超过 12 回合。
 - Scout 专门处理大目录、日志、文件定位和第一遍项目调查。
 - Gate 检查构建、测试、类型检查、lint、HTML 内联脚本语法、diff 大小、依赖变化和密钥痕迹。
 - 质量策略固定为：90 分以上接受、80～89 分只返工一次、低于 80 分由 Codex 接管。
 - `project_task` 在首次 Gate 返回 `retry` 时会在同一个 MCP 调用内自动执行一次定向返工，并合并两轮修改和用量；第二轮仍不合格才交给 Codex。
 - Scout/Worker 遇到轮次上限、超时、429/5xx、进程或结构化输出故障时，最多自动切换一次到独立助手/外壳；认证、权限、Key 配置和安全错误立即停止。
+- 联网请求会区分 DNS、连接超时/拒绝、网络不可达、连接重置、TLS 和请求超时；安全可重放的失败最多重试一次，付费 POST 在送达状态不明时不会自动重放。
 - 构建/测试失败、密钥痕迹、越界修改等硬故障会跳过返工，立即要求 Codex 接管。
-- Worker 和 Gate 都生成 JSON 交接文件，Codex 接手时无需重新扫描整个项目。
+- Planner、Scout、Worker 和 Gate 贯穿同一个 `project-*` 任务 ID 并生成 JSON 交接文件，Codex 接手时无需重新扫描整个项目。
+- 即使底层模型因墙钟超时以非零状态结束，`project_task` 也会回收结构化交接，保留已修改文件、真实失败类型和精确用量后再决定接力。
 - 没有首次提交的 Git 仓库使用 `unborn` 基线，不再误判为非 Git 项目。
 - API key 只从环境变量读取，不写入代码或 Codex 配置示例。
 - Router 基于 Node.js；本地 worker 脚本面向 Windows PowerShell。
@@ -102,7 +105,7 @@ DEEPSEEK_MCP_MODEL = 'your-model-id'
 
 内置价格只用于估算，实际账单以服务商和地区为准。默认档位参考 [阿里云百炼模型价格](https://help.aliyun.com/zh/model-studio/model-pricing) 和 [DeepSeek 官方模型价格](https://api-docs.deepseek.com/zh-cn/quick_start/pricing)。
 
-## v0.7 预算感知路由
+## v0.7 预算感知路由与 v0.8 Provider Registry 预览
 
 `budget_route` 与原有 AI Team Worker 路由相互独立，不会改变 `delegate_task` 的行为。它支持：
 
@@ -110,7 +113,7 @@ DEEPSEEK_MCP_MODEL = 'your-model-id'
 - `balanced`：综合能力、价格、上下文、延迟、健康状态和剩余限额。
 - `quality_first`：提高显式质量与能力元数据的权重，但仍执行预算、能力和隐私硬约束。
 
-默认 `dry_run=true`。预览结果包含所有候选、排除原因、分项得分、最终选择和备用链。只有显式设置 `dry_run=false` 才发送 `/chat/completions` 请求。路由仅对 OpenRouter `402`、`429`、Groq `429`、`498` 和服务端 `5xx` 安全降级；`401`、`403` 及其他客户端错误立即停止。`Retry-After` 会记录在尝试结果中，但路由器不会自动休眠。
+默认 `dry_run=true`。预览结果包含所有候选、排除原因、分项得分、最终选择和备用链。只有显式设置 `dry_run=false` 才发送生成请求。OpenRouter、Groq、SiliconFlow 和通用 OpenAI-compatible 端点使用 Chat Completions；Gemini 使用原生 `generateContent`。路由仅对明确的额度/限流/容量错误和服务端 `5xx` 安全降级；`400`、`401`、`403` 及其他客户端错误立即停止。`Retry-After` 会记录在尝试结果中，但路由器不会自动休眠。
 
 能力和隐私采用保守策略：缺失的 `code`、`tools`、`web` 或零数据保留元数据不会被推断为支持。可用 `AI_TEAM_MODEL_METADATA_JSON` 为具体模型补充经过你核实的元数据，例如：
 
@@ -121,6 +124,10 @@ AI_TEAM_OPENROUTER_FREE_FALLBACK = 'false'
 ```
 
 `openrouter/free` 只在 `AI_TEAM_OPENROUTER_FREE_FALLBACK=true` 时加入 `free_only` 候选，并继续接受能力、上下文和隐私过滤。免费模型、价格和限额会变化，路由器不会写死额度数字或承诺可用性。
+
+v0.8 的 Provider Registry 将供应商与协议分离。内置注册项为 `openrouter`、`groq`、`gemini`、`siliconflow`、`openai` 和 `openai_compatible`。OpenAI 使用原生 Responses API；通用端点继续使用 Chat Completions，并允许无需 Key 的本地服务。Base URL 只能由维护者通过环境变量配置，`budget_route` 调用者不能传入任意 URL。Gemini 免费/未付费服务不会被标记为零数据保留；隐私敏感任务会默认排除，除非管理员依据适用合同明确覆盖元数据。
+
+SiliconFlow 是独立的云端数据与内容政策边界，不会因为模型 ID 中含有 Qwen、DeepSeek 等名称而被当成模型厂商直连。它不在默认 Provider 列表中，必须在 `providers` 中显式选择。其价格、免费状态和能力不会从模型名称猜测；`free_only` 只接受管理员为具体模型核实并补充的零价格元数据。涉及凭证、私有代码、个人数据等内容时设置 `sensitive=true`；涉及受供应商或司法辖区内容规则约束的话题时设置 `policy_sensitive=true`，SiliconFlow 候选会以明确原因被排除。不要利用模型切换规避供应商政策或适用法律。
 
 ## 仓库结构
 
@@ -217,6 +224,10 @@ XAI_API_KEY
 ```text
 OPENROUTER_API_KEY
 GROQ_API_KEY
+GEMINI_API_KEY
+SILICONFLOW_API_KEY
+OPENAI_COMPATIBLE_API_KEY
+OPENAI_API_KEY
 ```
 
 Windows 用户级环境变量示例：
@@ -227,9 +238,32 @@ Windows 用户级环境变量示例：
 [Environment]::SetEnvironmentVariable("XAI_API_KEY", "YOUR_KEY", "User")
 [Environment]::SetEnvironmentVariable("OPENROUTER_API_KEY", "YOUR_KEY", "User")
 [Environment]::SetEnvironmentVariable("GROQ_API_KEY", "YOUR_KEY", "User")
+[Environment]::SetEnvironmentVariable("GEMINI_API_KEY", "YOUR_KEY", "User")
+[Environment]::SetEnvironmentVariable("SILICONFLOW_API_KEY", "YOUR_KEY", "User")
 ```
 
 设置后需要重启 Codex，使桌面进程重新读取环境变量。
+
+### 可信代理与网络回退
+
+路由器不会扫描、下载或自动连接公网免费代理。只有维护者已经通过环境变量明确配置的 HTTP/HTTPS 代理才会被使用：
+
+```text
+AI_TEAM_TRUSTED_PROXY_URL   # 可选的专用代理；优先级最高
+HTTPS_PROXY / HTTP_PROXY   # 标准可信代理配置
+NO_PROXY                   # 绕过代理的主机；localhost/127.0.0.1/::1 始终加入
+AI_TEAM_PROXY_MODE         # fallback（默认）、always 或 off
+```
+
+`fallback` 先直连，只有 DNS、连接建立超时/拒绝或网络不可达等可安全判断的失败才尝试一次代理。`always` 从第一步就使用已配置代理；`off` 禁止代理。诊断结果只报告是否配置/尝试了代理，不输出代理 URL 或其中的凭证。TLS 错误不会通过关闭证书校验解决。Grok 网络失败会返回结构化 `network_unavailable` 结果，不再退化成无上下文的 MCP `fetch failed`。
+
+Windows 用户可以只读检查自己已经配置的本地可信代理：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-proxy-health.ps1 -JsonOnly
+```
+
+脚本只读取当前 Windows 系统代理或显式传入的 HTTP/HTTPS 代理，默认拒绝非本机地址；它检查 xAI、Grok 和 GitHub 的 HTTPS 连通性，不读取订阅、不枚举或切换节点、不搜索公共代理，也不关闭 TLS 验证。机场节点异常时先在自己的客户端切换节点，再重新运行检查。
 
 ## 接入 Codex
 
@@ -247,8 +281,15 @@ startup_timeout_sec = 60
 QWEN_MCP_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
 DEEPSEEK_MCP_BASE_URL = 'https://api.deepseek.com/anthropic'
 XAI_MCP_BASE_URL = 'https://api.x.ai/v1'
+AI_TEAM_PROXY_MODE = 'fallback'
+# Optional trusted proxy only. Prefer a user/system environment variable when it contains credentials.
+# AI_TEAM_TRUSTED_PROXY_URL = 'http://127.0.0.1:7890'
 OPENROUTER_MCP_BASE_URL = 'https://openrouter.ai/api/v1'
 GROQ_MCP_BASE_URL = 'https://api.groq.com/openai/v1'
+GEMINI_MCP_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta'
+SILICONFLOW_MCP_BASE_URL = 'https://api.siliconflow.cn/v1'
+# Optional administrator-configured endpoint; never accept this URL from task input.
+OPENAI_COMPATIBLE_BASE_URL = 'http://127.0.0.1:1234/v1'
 ```
 
 不填写模型名即使用自动模式。
@@ -263,6 +304,7 @@ GROQ_MCP_BASE_URL = 'https://api.groq.com/openai/v1'
 
 ```text
 delegate_task
+doctor
 grok_search
 budget_route
 project_task
@@ -423,8 +465,7 @@ DeepSeek worker：
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-worker.ps1 `
   -Worker deepseek `
   -Task "定位失败测试并提交最小修复" `
-  -Cwd "C:\path\to\project" `
-  -DeepSeekMaxBudgetUsd 0.10
+  -Cwd "C:\path\to\project"
 ```
 
 直接调用脚本时，`auto` 可能在无交互后台拒绝编辑；需要实际实现时使用 `yolo`，并同时设置 `AllowedPath`、保持 Git 可恢复、随后运行 Gate。`project_task` 已把这套流程串联起来。
@@ -480,7 +521,7 @@ MCP 请求会记录服务商返回的准确 Token 用量、模型、耗时、是
 
 xAI 请求还会记录官方 `cost_in_usd_ticks` 换算出的实际美元扣费、服务端搜索次数和引用 URL；该金额已经包含 Token、缓存折扣和搜索工具调用。
 
-Qwen Code Agent 外壳使用结构化 JSON 输出，Worker 账本会记录服务商返回的输入、输出、缓存 Token、回合数和公开单价估算。旧版 Claude Code 兼容外壳仍不提供统一 Token 字段，因此该模式只记录可验证信息，不编造用量：
+Qwen Code Agent 外壳使用结构化 JSON 输出。Qwen 与 DeepSeek Worker 共享这一隔离外壳，账本会记录服务商返回的输入、输出、缓存 Token、回合数和公开单价估算：
 
 ```text
 %USERPROFILE%\.codex-ai-team\usage\worker-runs.jsonl
@@ -488,7 +529,7 @@ Qwen Code Agent 外壳使用结构化 JSON 输出，Worker 账本会记录服务
 
 账本中的 `estimated_cost_cny` 只是按仓库价格目录计算的估值；缓存折扣、限时活动、地域和账户阶梯价以服务商账单为准。Worker 的完整结构化响应保存在每次运行目录的 `qwen-result.json`，Codex 默认只读取短摘要。
 
-DeepSeek Worker 默认使用 Qwen Code 的 OpenAI-compatible Agent 外壳，并在每次运行目录中生成不含密钥的临时 Provider 配置，声明 DeepSeek V4 的上下文能力；这避免 Claude Code 对第三方模型费用的错误估算。需要兼容旧流程时可显式传入 `-DeepSeekHarness claude`。
+DeepSeek Worker 固定使用 Qwen Code 的 OpenAI-compatible Agent 外壳，并在每次运行目录中生成不含密钥的临时 Provider 配置，声明 DeepSeek V4 的上下文能力。后台 Worker 不依赖 Claude Code。
 
 可以手动执行极小的在线探针验证两个账号和自动选择。该命令会产生少量模型费用，不会被 `npm test` 自动执行：
 
@@ -544,7 +585,7 @@ npm run probe:xai
 
 - 本项目不会把 API key 写入源代码。
 - MCP 和脚本会读取用户环境变量中的 key。
-- `budget_route` 不接受 Key 参数；它只读取 `OPENROUTER_API_KEY` / `GROQ_API_KEY` 环境变量，并对已知凭证值和 Bearer 片段做错误脱敏。
+- `budget_route` 不接受 Key 或 Base URL 参数；它只读取管理员配置的环境变量，并对 Bearer、Google 和已知凭证值做错误脱敏。
 - 敏感任务默认应设置 `sensitive=true` 或 `require_zero_data_retention=true`；没有显式零数据保留元数据的候选会被排除。
 - Worker 能运行工具并修改工作区，运行前应确认目标目录正确。
 - 完整 worker 日志可能包含任务中出现的敏感信息，**项目不会自动保证日志脱敏**。
@@ -554,7 +595,7 @@ npm run probe:xai
 
 ## 可选路径变量
 
-如果 Node、Git、Qwen Code 或 Claude Code 不在系统 PATH，可设置：
+如果 Node、Git 或 Qwen Code 不在系统 PATH，可设置：
 
 ```text
 AI_TEAM_NODE_DIR
@@ -580,8 +621,8 @@ AI_TEAM_TOOLS_DIR
 
 ### DeepSeek 请求失败
 
-- 检查 `ANTHROPIC_API_KEY` 或 `ANTHROPIC_AUTH_TOKEN`。
-- 确认接口支持 Anthropic Messages 兼容格式。
+- 优先检查 `DEEPSEEK_API_KEY`；旧配置也兼容 `ANTHROPIC_API_KEY` 或 `ANTHROPIC_AUTH_TOKEN`。
+- 确认 DeepSeek OpenAI-compatible 接口可用。
 - 运行 `npm run probe:live` 检查账号可见模型和自动选择结果。
 - 只有使用 `AI_TEAM_MODEL_MODE=fixed` 时才需要人工检查 `DEEPSEEK_MCP_MODEL`。
 

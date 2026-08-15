@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { mechanicalInspect } from "./mechanical-inspector.mjs";
 import { planTaskTeam } from "./team-planner.mjs";
-import { buildTargetedRetryPrompt, selectTurnPolicy } from "./turn-policy.mjs";
+import { buildTargetedRetryPrompt, selectScoutTurnPolicy, selectTurnPolicy } from "./turn-policy.mjs";
 
 const execFileAsync = promisify(execFile);
 const serverDir = dirname(fileURLToPath(import.meta.url));
@@ -72,6 +72,24 @@ async function runPowerShell(script, scriptArgs, timeoutMs) {
       { encoding: "utf8", windowsHide: true, timeout: timeoutMs, maxBuffer: 1024 * 1024 },
     );
   } catch (error) {
+    // Worker scripts deliberately return a structured JSON handoff even when
+    // the underlying model CLI exits non-zero (for example after a wall-clock
+    // timeout with useful partial files). Windows PowerShell can propagate the
+    // native CLI's LASTEXITCODE after printing that JSON. Preserve the handoff
+    // so project_task can classify the real failure and perform bounded
+    // failover instead of discarding changed files and usage accounting.
+    const stdout = String(error?.stdout || "");
+    if (stdout.trim()) {
+      try {
+        parseJsonOutput(stdout, "PowerShell structured handoff");
+        return {
+          stdout,
+          stderr: String(error?.stderr || ""),
+          recovered_nonzero_exit: true,
+          exit_code: Number(error?.code) || null,
+        };
+      } catch {}
+    }
     const details = compact([error?.message, error?.stdout, error?.stderr].filter(Boolean).join("\n"), 1800);
     throw new Error(`Local project worker failed: ${details}`);
   }
@@ -128,10 +146,11 @@ export async function ensureGitBaseline(cwd, mode) {
   }
 }
 
-async function runScout({ task, cwd, worker, harness = "qwen", budget, maxWallTime, timeoutMs, maxTurns = 2, summaryMaxChars = 2400 }) {
+async function runScout({ task, taskId, cwd, worker, harness = "qwen", budget, maxWallTime, timeoutMs, maxTurns = 4, summaryMaxChars = 2400 }) {
   const scoutScript = await resolveScript("codex-scout.ps1");
   const scriptArgs = [
     "-Task", String(task),
+    "-TaskId", String(taskId || ""),
     "-Cwd", cwd,
     "-Worker", worker,
     "-Budget", budget,
@@ -140,7 +159,6 @@ async function runScout({ task, cwd, worker, harness = "qwen", budget, maxWallTi
     "-SummaryMaxChars", String(summaryMaxChars),
     "-JsonOnly",
   ];
-  if (worker === "deepseek") scriptArgs.push("-DeepSeekHarness", harness);
   const execution = await runPowerShell(scoutScript, scriptArgs, timeoutMs);
   const result = parseJsonOutput(execution.stdout, `${worker} scout worker`);
   return { ...result, worker: result.worker || worker, harness: result.harness || harness };
@@ -205,7 +223,10 @@ function combineInspectionResults(results) {
 }
 
 function combineUsage(results = []) {
-  const keys = ["input_tokens", "output_tokens", "cache_read_tokens", "total_tokens", "num_turns"];
+  const keys = [
+    "input_tokens", "output_tokens", "cache_read_tokens", "uncached_input_tokens",
+    "thinking_tokens", "total_tokens", "num_turns", "request_count", "provider_duration_ms",
+  ];
   let anyUnavailable = false;
   const usage = results.reduce((sum, result) => {
     const u = result?.usage;
@@ -259,7 +280,7 @@ export function computeProjectDeadline({
   );
   const requestedSeconds = Math.max(30, Math.floor(Number(requestedMinutes) * 60));
   const retryTimeoutSeconds = attemptCount === 2
-    ? Math.min(60, Math.max(30, Math.floor(workerPoolSeconds * 0.28)))
+    ? Math.min(45, Math.max(30, Math.floor(workerPoolSeconds * 0.20)))
     : 0;
   const firstTimeoutSeconds = Math.min(requestedSeconds + 8, workerPoolSeconds - retryTimeoutSeconds);
   const attemptTimeoutSeconds = attemptCount === 2
@@ -301,6 +322,7 @@ export function shouldRunTargetedRetry(gate, attempt, finalAttempt = 2) {
 const TERMINAL_WORKER_FAILURE = /\b(?:401|403|unauthori[sz]ed|forbidden|authentication|invalid (?:api|auth)[ _-]?key|(?:api|auth)[ _-]?key.*(?:missing|not configured)|permission denied|access denied)\b|(?:api|auth)[ _-]?key[^\n]*is not configured|allowed_paths? must|outside allowed|secret detected|forbidden path|invalid cwd|script not found/i;
 const TURN_LIMIT_FAILURE = /FatalTurnLimited|reached max(?:imum)? session turns|max session turns|session turn limit|turn limit(?:ed)?/i;
 const TIMEOUT_FAILURE = /ETIMEDOUT|timed? out|timeout|exceeded.*wall.?time/i;
+const HARNESS_STDIN_FAILURE = /no stdin data received|stdin.*(?:not received|initiali[sz]|closed|unavailable)/i;
 const TRANSIENT_WORKER_FAILURE = /\b(?:429|rate.?limit|500|502|503|504|service unavailable|bad gateway|gateway timeout|ECONNRESET|ECONNREFUSED|connection reset|temporary|capacity|overloaded)\b|structured output could not be parsed|did not return valid json|produced no result|process.*(?:failed|crash)|cli.*(?:failed|not found|not recognized)/i;
 
 export function classifyWorkerFailure(workerResult = {}) {
@@ -310,26 +332,28 @@ export function classifyWorkerFailure(workerResult = {}) {
   if (TERMINAL_WORKER_FAILURE.test(text)) return { kind: "configuration_or_safety", retryable: false };
   if (TURN_LIMIT_FAILURE.test(text)) return { kind: "turn_limit", retryable: true };
   if (TIMEOUT_FAILURE.test(text)) return { kind: "timeout", retryable: true };
+  if (HARNESS_STDIN_FAILURE.test(text)) return { kind: "harness_stdin", retryable: true };
   if (TRANSIENT_WORKER_FAILURE.test(text)) return { kind: "transient_or_harness", retryable: true };
   return { kind: "worker_failure", retryable: true };
 }
 
 export function selectWorkerFailoverRoute(route = {}) {
   const worker = route.worker === "qwen" ? "qwen" : "deepseek";
-  const harness = route.harness === "claude" ? "claude" : "qwen";
-  if (worker === "qwen" || harness === "qwen") {
-    return { worker: "deepseek", harness: "claude" };
-  }
+  if (worker === "qwen") return { worker: "deepseek", harness: "qwen" };
   return { worker: "qwen", harness: "qwen" };
 }
 
 export function buildWorkerFailoverTask(workerResult = {}, failure = {}, fromRoute = {}, toRoute = {}) {
+  const changedFiles = (workerResult.changed_files || []).map(String).filter(Boolean);
+  const allowedPaths = (workerResult.allowed_paths || []).map(String).filter(Boolean);
   return [
     "Worker failover: this is attempt 2 of 2. Continue from the current workspace state.",
     "Do not repeat broad discovery. Inspect only what is needed to finish or verify the prior partial work.",
     `Previous route ${fromRoute.worker || "unknown"}/${fromRoute.harness || "unknown"} failed (${failure.kind || "worker_failure"}).`,
     `Continue with ${toRoute.worker || "fallback"}/${toRoute.harness || "default"}; do not bypass authentication, permission, quota, or safety restrictions.`,
-    workerResult.summary ? `Previous attempt summary:\n${compact(workerResult.summary, 900)}` : "",
+    changedFiles.length > 0 ? `Useful partial files already changed: ${changedFiles.join(", ")}. Preserve them unless focused validation proves they are wrong.` : "",
+    allowedPaths.length > 0 ? `Original allowed paths: ${allowedPaths.join(", ")}. Determine the remaining scope by comparing these paths with the current workspace diff.` : "",
+    workerResult.summary ? `Previous attempt summary:\n${compact(workerResult.summary, changedFiles.length > 0 ? 450 : 900)}` : "",
   ].filter(Boolean).join("\n");
 }
 
@@ -434,18 +458,21 @@ export async function runProjectTask(args = {}) {
   const changedFileSet = new Set();
 
   if (preview.mode === "inspect") {
+    const firstScoutPolicy = selectScoutTurnPolicy({ complexity: preview.complexity.level, attempt: initialAttempt });
     const workers = preview.team.coding_assistants >= 2
       ? [preview.worker, preview.planner]
       : [preview.worker];
     const initialRoutes = workers.map((worker) => ({ worker, harness: "qwen" }));
     const settled = await Promise.allSettled(initialRoutes.map((route) => runScout({
       task: args.task,
+      taskId,
       cwd,
       worker: route.worker,
       harness: route.harness,
       budget: preview.budget,
       maxWallTime: `${deadline.max_wall_time_seconds[0]}s`,
       timeoutMs: deadline.attempt_timeout_seconds[0] * 1000,
+      maxTurns: firstScoutPolicy.max_session_turns,
     })));
     const results = settled.map((entry, index) => entry.status === "fulfilled"
       ? entry.value
@@ -469,7 +496,7 @@ export async function runProjectTask(args = {}) {
       gate_decision: null,
       gate_score: null,
       failure_kind: firstFailure.kind,
-      turn_policy: selectTurnPolicy({ complexity: preview.complexity.level, attempt: initialAttempt }),
+      turn_policy: firstScoutPolicy,
     });
 
     if (preview.worker_failover && firstFailure.retryable && initialAttempt < finalAttempt) {
@@ -480,13 +507,14 @@ export async function runProjectTask(args = {}) {
       try {
         fallbackResult = await runScout({
           task: [String(args.task), fallbackTask].join("\n\n"),
+          taskId,
           cwd,
           worker: fallbackRoute.worker,
           harness: fallbackRoute.harness,
           budget: preview.budget,
           maxWallTime: `${deadline.max_wall_time_seconds[1]}s`,
           timeoutMs: deadline.attempt_timeout_seconds[1] * 1000,
-          maxTurns: selectTurnPolicy({ complexity: preview.complexity.level, attempt: 2 }).max_session_turns,
+          maxTurns: selectScoutTurnPolicy({ complexity: preview.complexity.level, attempt: 2 }).max_session_turns,
         });
       } catch (error) {
         fallbackResult = {
@@ -512,7 +540,7 @@ export async function runProjectTask(args = {}) {
         gate_decision: null,
         gate_score: null,
         failure_kind: fallbackFailure.kind,
-        turn_policy: selectTurnPolicy({ complexity: preview.complexity.level, attempt: 2 }),
+        turn_policy: selectScoutTurnPolicy({ complexity: preview.complexity.level, attempt: 2 }),
       });
     }
   } else {
@@ -525,6 +553,7 @@ export async function runProjectTask(args = {}) {
             "Do not edit files.",
             String(args.task),
           ].join("\n\n"),
+          taskId,
           cwd,
           worker: preview.planner,
           budget: "low",
@@ -568,7 +597,6 @@ export async function runProjectTask(args = {}) {
         "-AllowedPathJson", allowedJson,
         "-JsonOnly",
       ];
-      if (currentRoute.worker === "deepseek") workerArgs.push("-DeepSeekHarness", currentRoute.harness);
       try {
         const workerExecution = await runPowerShell(workerScript, workerArgs, attemptTimeoutSeconds * 1000);
         workerResult = parseJsonOutput(workerExecution.stdout, "Project worker");
@@ -667,8 +695,12 @@ export async function runProjectTask(args = {}) {
     planner: preview.planner,
     complexity: preview.complexity,
     turn_policy: {
-      first_attempt: selectTurnPolicy({ complexity: preview.complexity.level, attempt: 1 }),
-      targeted_retry: selectTurnPolicy({ complexity: preview.complexity.level, attempt: 2 }),
+      first_attempt: preview.mode === "inspect"
+        ? selectScoutTurnPolicy({ complexity: preview.complexity.level, attempt: 1 })
+        : selectTurnPolicy({ complexity: preview.complexity.level, attempt: 1 }),
+      targeted_retry: preview.mode === "inspect"
+        ? selectScoutTurnPolicy({ complexity: preview.complexity.level, attempt: 2 })
+        : selectTurnPolicy({ complexity: preview.complexity.level, attempt: 2 }),
       planner_max_session_turns: deadline.planner_max_turns,
     },
     team: {

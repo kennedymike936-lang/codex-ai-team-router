@@ -12,6 +12,8 @@ import { planTaskTeam } from "./team-planner.mjs";
 import { recordUsage, usageEvent, usageSummary } from "./usage-ledger.mjs";
 import { xaiSearchClient } from "./xai-search.mjs";
 import { createBudgetRouter } from "./budget-router.mjs";
+import { isNetworkRequestError, resilientFetch } from "./network-client.mjs";
+import { runDoctor } from "./doctor.mjs";
 
 const DEFAULT_CHECKLIST = [
   "code can run/build",
@@ -110,6 +112,35 @@ function groqConfig() {
   };
 }
 
+function geminiConfig() {
+  return {
+    apiKey: readUserEnv("GEMINI_API_KEY") || readUserEnv("GOOGLE_API_KEY"),
+    baseUrl: process.env.GEMINI_MCP_BASE_URL || "https://generativelanguage.googleapis.com/v1beta",
+  };
+}
+
+function siliconFlowConfig() {
+  return {
+    apiKey: readUserEnv("SILICONFLOW_API_KEY"),
+    baseUrl: process.env.SILICONFLOW_MCP_BASE_URL || "https://api.siliconflow.cn/v1",
+  };
+}
+
+function openAiCompatibleConfig() {
+  return {
+    apiKey: readUserEnv("OPENAI_COMPATIBLE_API_KEY"),
+    // Administrator-controlled only. Tool callers cannot supply arbitrary URLs.
+    baseUrl: process.env.OPENAI_COMPATIBLE_BASE_URL || "",
+  };
+}
+
+function openAiResponsesConfig() {
+  return {
+    apiKey: readUserEnv("OPENAI_API_KEY"),
+    baseUrl: process.env.OPENAI_MCP_BASE_URL || "https://api.openai.com/v1",
+  };
+}
+
 function budgetRouterMetadata() {
   const value = process.env.AI_TEAM_MODEL_METADATA_JSON;
   if (!value) return {};
@@ -200,7 +231,7 @@ async function callQwen({ task, context, outputSchema, maxTokens, budget }) {
       max_tokens: maxTokens,
       stream: false,
     };
-    const response = await fetch(url, {
+    const response = await resilientFetch(url, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
       body: JSON.stringify(body),
@@ -272,7 +303,7 @@ async function callDeepSeek({ task, context, outputSchema, maxTokens, budget }) 
     };
     let unavailable = false;
     for (let headerIndex = 0; headerIndex < headerSets.length; headerIndex += 1) {
-      const response = await fetch(url, {
+      const response = await resilientFetch(url, {
         method: "POST", headers: headerSets[headerIndex], body: JSON.stringify(body),
       });
       const text = await response.text();
@@ -387,6 +418,22 @@ function formattedGrok(response, maxChars = 4500) {
   return `Model: ${response.event.model}\nUsage: ${usageSummary(response.event)}\nSearch calls: ${toolCount}\n\n${compactText(response.text, maxChars)}${sources}`;
 }
 
+function networkFailureResult(error, route = "grok") {
+  const diagnostic = error.diagnostic || {};
+  return {
+    status: "network_unavailable",
+    route,
+    retryable: diagnostic.transient === true && diagnostic.delivery_uncertain !== true,
+    fallback_recommended: true,
+    diagnostic,
+    message: error.message,
+  };
+}
+
+function safeAssistantFailover(error) {
+  return isNetworkRequestError(error) && error.diagnostic?.delivery_uncertain !== true;
+}
+
 async function delegate(args) {
   const preferred = args.preferred || "auto";
   const team = planTaskTeam({
@@ -411,21 +458,40 @@ async function delegate(args) {
   }
 
   if (route === "qwen") {
-    const qwen = await callQwen({ task, context, outputSchema, maxTokens, budget: args.budget || "low" });
-    return `${routingHeader}\n\n## Qwen\n${formattedWorker("Qwen", qwen)}`;
+    try {
+      const qwen = await callQwen({ task, context, outputSchema, maxTokens, budget: args.budget || "low" });
+      return `${routingHeader}\n\n## Qwen\n${formattedWorker("Qwen", qwen)}`;
+    } catch (error) {
+      if (!safeAssistantFailover(error)) throw error;
+      const deepseek = await callDeepSeek({ task, context, outputSchema, maxTokens, budget: args.budget || "low" });
+      return `${routingHeader}\nFailover: qwen -> deepseek (${error.diagnostic.category})\n\n## DeepSeek\n${formattedWorker("DeepSeek", deepseek)}`;
+    }
   }
   if (route === "deepseek") {
-    const deepseek = await callDeepSeek({ task, context, outputSchema, maxTokens, budget: args.budget || "low" });
-    return `${routingHeader}\n\n## DeepSeek\n${formattedWorker("DeepSeek", deepseek)}`;
+    try {
+      const deepseek = await callDeepSeek({ task, context, outputSchema, maxTokens, budget: args.budget || "low" });
+      return `${routingHeader}\n\n## DeepSeek\n${formattedWorker("DeepSeek", deepseek)}`;
+    } catch (error) {
+      if (!safeAssistantFailover(error)) throw error;
+      const qwen = await callQwen({ task, context, outputSchema, maxTokens, budget: args.budget || "low" });
+      return `${routingHeader}\nFailover: deepseek -> qwen (${error.diagnostic.category})\n\n## Qwen\n${formattedWorker("Qwen", qwen)}`;
+    }
   }
   if (route === "grok") {
     const source = searchSourceForText(`${task}\n${context}`);
-    const grok = await callGrokSearch({
-      query: [task, context ? `Context:\n${context}` : ""].filter(Boolean).join("\n\n"),
-      source,
-      budget: args.budget || "low",
-    });
-    return `${routingHeader}\n\n## Grok Search\n${formattedGrok(grok)}`;
+    try {
+      const grok = await callGrokSearch({
+        query: [task, context ? `Context:\n${context}` : ""].filter(Boolean).join("\n\n"),
+        source,
+        budget: args.budget || "low",
+      });
+      return `${routingHeader}\n\n## Grok Search\n${formattedGrok(grok)}`;
+    } catch (error) {
+      if (isNetworkRequestError(error)) {
+        return `${routingHeader}\n\n${JSON.stringify(networkFailureResult(error), null, 2)}`;
+      }
+      throw error;
+    }
   }
 
   if (route === "team") {
@@ -495,7 +561,7 @@ const tools = [
   },
   {
     name: "budget_route",
-    description: "Free-tier-aware, capability-aware routing across OpenRouter and Groq. dry_run defaults to true: it may discover models but never sends a chat-completion request. Actual execution uses only configured provider keys and falls back only on quota, rate-limit, capacity, or 5xx responses.",
+    description: "Free-tier-aware, capability-aware routing across registered providers including OpenRouter, Groq, Gemini, SiliconFlow, and an administrator-configured OpenAI-compatible endpoint. dry_run defaults to true. Actual execution uses only configured provider keys and falls back only on quota, rate-limit, capacity, or 5xx responses.",
     inputSchema: {
       type: "object",
       properties: {
@@ -514,7 +580,7 @@ const tools = [
         mode: { type: "string", enum: ["free_only", "balanced", "quality_first"] },
         providers: {
           type: "array",
-          items: { type: "string", enum: ["openrouter", "groq"] },
+          items: { type: "string", enum: ["openrouter", "groq", "gemini", "siliconflow", "openai", "openai_compatible"] },
         },
         requirements: {
           type: "object",
@@ -525,6 +591,7 @@ const tools = [
             },
             min_context_length: { type: "number" },
             sensitive: { type: "boolean" },
+            policy_sensitive: { type: "boolean" },
             require_zero_data_retention: { type: "boolean" },
           },
         },
@@ -601,6 +668,15 @@ const tools = [
       },
     },
   },
+  {
+    name: "doctor",
+    description: "Read-only diagnostic of local AI Team configuration and tool availability. Reports Node, PowerShell, Git, Qwen harness availability, per-provider configuration (presence only, never values), and trusted HTTP/HTTPS or Windows system proxy presence. Never makes paid model calls, never writes to environment/registry/system, and never changes proxies. Public proxy discovery and TLS verification bypass are forbidden.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+  },
 ];
 
 const server = new Server(
@@ -621,7 +697,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   if (name === "budget_route") {
     const dryRun = args.dry_run !== false;
     const mode = args.mode || "balanced";
-    const providers = args.providers || ["openrouter", "groq"];
+    const providers = args.providers || ["openrouter", "groq", "gemini"];
     const requirements = args.requirements || {};
     const maxTokens = args.max_tokens || 1024;
 
@@ -630,8 +706,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     const openrouter = openRouterConfig();
     const groq = groqConfig();
-    const apiKeys = { openrouter: openrouter.apiKey, groq: groq.apiKey };
-    const baseUrls = { openrouter: openrouter.baseUrl, groq: groq.baseUrl };
+    const gemini = geminiConfig();
+    const siliconflow = siliconFlowConfig();
+    const openaiCompatible = openAiCompatibleConfig();
+    const openai = openAiResponsesConfig();
+    const apiKeys = {
+      openrouter: openrouter.apiKey,
+      groq: groq.apiKey,
+      gemini: gemini.apiKey,
+      siliconflow: siliconflow.apiKey,
+      openai_compatible: openaiCompatible.apiKey,
+      openai: openai.apiKey,
+    };
+    const baseUrls = {
+      openrouter: openrouter.baseUrl,
+      groq: groq.baseUrl,
+      gemini: gemini.baseUrl,
+      siliconflow: siliconflow.baseUrl,
+      openai_compatible: openaiCompatible.baseUrl,
+      openai: openai.baseUrl,
+    };
     const messages = args.messages || [{ role: "user", content: args.task }];
 
     const outcome = await budgetRouter.execute({
@@ -641,7 +735,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       providers,
       apiKeys,
       baseUrls,
-      fetchImpl: fetch,
+      fetchImpl: resilientFetch,
       messages,
       max_tokens: maxTokens,
       dry_run: dryRun,
@@ -650,18 +744,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     return result(JSON.stringify(outcome, null, 2));
   }
 
+  if (name === "doctor") {
+    return result(JSON.stringify(runDoctor(), null, 2));
+  }
+
   if (name === "grok_search") {
     const source = !args.source || args.source === "auto" ? searchSourceForText(args.query) : args.source;
     if (args.dry_run === true) return result(`Route: grok search (${source}); one server-side tool turn`);
-    const grok = await callGrokSearch({
-      query: args.query,
-      source,
-      allowedXHandles: args.allowed_x_handles || [],
-      fromDate: args.from_date || "",
-      toDate: args.to_date || "",
-      budget: args.budget || "low",
-    });
-    return result(`Route: grok\n\n## Grok Search\n${formattedGrok(grok)}`);
+    try {
+      const grok = await callGrokSearch({
+        query: args.query,
+        source,
+        allowedXHandles: args.allowed_x_handles || [],
+        fromDate: args.from_date || "",
+        toDate: args.to_date || "",
+        budget: args.budget || "low",
+      });
+      return result(`Route: grok\n\n## Grok Search\n${formattedGrok(grok)}`);
+    } catch (error) {
+      if (isNetworkRequestError(error)) return result(JSON.stringify(networkFailureResult(error), null, 2));
+      throw error;
+    }
   }
 
   if (name === "project_task") {

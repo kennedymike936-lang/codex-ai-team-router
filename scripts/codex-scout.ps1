@@ -3,18 +3,17 @@ param(
   [Parameter(Mandatory = $true)]
   [string]$Task,
 
+  [string]$TaskId = "",
+
   [string]$Cwd = (Get-Location).Path,
 
   [ValidateSet("auto", "qwen", "deepseek")]
   [string]$Worker = "auto",
 
-  [ValidateSet("qwen", "claude")]
-  [string]$DeepSeekHarness = "qwen",
-
   [string]$MaxWallTime = "5m",
 
-  [ValidateRange(2, 8)]
-  [int]$MaxSessionTurns = 2,
+  [ValidateRange(3, 8)]
+  [int]$MaxSessionTurns = 4,
 
   [ValidateSet("low", "normal", "deep")]
   [string]$Budget = "low",
@@ -77,7 +76,7 @@ function Test-ScoutPackDisabled {
   }
   $broadInspection = $Task -match '(?i)\b(architecture|architectural|overview|pipeline|workflow|orchestration|staged|sequence|relationship|across|multi[- ]?(file|module)|implementation plan|explain how|map the project)\b|\u67b6\u6784|\u6574\u4f53|\u6d41\u7a0b|\u7f16\u6392|\u8de8\u6a21\u5757|\u591a\u6587\u4ef6|\u5982\u4f55\u5de5\u4f5c'
   if ($broadInspection) { return $false, "auto enabled for broad architecture or workflow inspection" }
-  return $true, "auto skipped for focused inspection"
+  return $false, "auto enabled for bounded mechanical preflight"
 }
 
 $scoutPackDisabled, $scoutPackReason = Test-ScoutPackDisabled
@@ -147,6 +146,8 @@ $packRules
 - Prefer exact file paths, likely files, relevant line numbers, and short excerpts.
 - For logs, return only the relevant last lines or matched lines.
 - If many files match, group them and show top candidates.
+- Use at most $([Math]::Max(1, $MaxSessionTurns - 1)) assistant turns for tools. Once that budget is spent, call no more tools and return the final answer immediately.
+- The final assistant turn must be tool-free and contain the requested conclusion, even if some evidence remains unavailable.
 - Keep the final answer under 25 lines. Return conclusions, exact paths, and relevant line numbers only.
 - Put detailed evidence in the worker result file; do not repeat it in the final answer.
 
@@ -166,6 +167,7 @@ if (-not (Test-Path -LiteralPath $workerScript)) {
 $workerArgs = @{
   Worker = $Worker
   Task = $scoutTask
+  TaskId = $TaskId
   Cwd = $Cwd
   Approval = "auto"
   Budget = $Budget
@@ -173,9 +175,6 @@ $workerArgs = @{
   MaxSessionTurns = $MaxSessionTurns
   SummaryLines = $SummaryLines
   SummaryMaxChars = $SummaryMaxChars
-}
-if ($Worker -eq "deepseek") {
-  $workerArgs.DeepSeekHarness = $DeepSeekHarness
 }
 if ($JsonOnly) {
   $workerArgs.JsonOnly = $true

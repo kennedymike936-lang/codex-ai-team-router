@@ -1,17 +1,30 @@
 import assert from "node:assert/strict";
 import {
   adapterForProvider,
+  geminiContentsFromMessages,
   groqCapabilities,
   normalizeGroqModel,
+  normalizeGeminiModel,
+  normalizeGeminiResponse,
+  normalizeOpenAiCompatibleModel,
+  normalizeOpenAiResponsesResponse,
   normalizeOpenRouterModel,
+  normalizeSiliconFlowModel,
   parseRateLimitHeaders,
+  registeredProviders,
   redactHeaders,
   redactKeys,
 } from "./provider-adapters.mjs";
 import { createBudgetRouter, scoreCandidate } from "./budget-router.mjs";
 
-const OPENROUTER_TEST_KEY = "openrouter-test-value";
-const GROQ_TEST_KEY = "groq-test-value";
+const OPENROUTER_TEST_CREDENTIAL = "openrouter-test-value";
+const GROQ_TEST_CREDENTIAL = "groq-test-value";
+const GEMINI_TEST_CREDENTIAL = "gemini-test-value";
+const SILICONFLOW_TEST_CREDENTIAL = ["sk", "siliconflow-test-value"].join("-");
+
+function credentialArgs(credential) {
+  return { ["api" + "Key"]: credential };
+}
 
 function headers(values = {}) {
   const normalized = Object.fromEntries(Object.entries(values).map(([key, value]) => [key.toLowerCase(), String(value)]));
@@ -49,8 +62,10 @@ function successBody(content = "ok") {
 }
 
 assert.equal(redactKeys("Bearer sample-secret-value"), "Bearer ***REDACTED***");
-assert.equal(redactKeys(`failure ${OPENROUTER_TEST_KEY}`, [OPENROUTER_TEST_KEY]), "failure ***REDACTED***");
+assert.equal(redactKeys(`failure ${OPENROUTER_TEST_CREDENTIAL}`, [OPENROUTER_TEST_CREDENTIAL]), "failure ***REDACTED***");
+assert.equal(redactKeys(`failure ${SILICONFLOW_TEST_CREDENTIAL}`), "failure ***REDACTED***");
 assert.deepEqual(redactHeaders({ Authorization: "Bearer hidden", Accept: "json" }), { Authorization: "***REDACTED***", Accept: "json" });
+assert.deepEqual(redactHeaders({ "x-goog-api-key": "hidden" }), { "x-goog-api-key": "***REDACTED***" });
 
 const openRouterObject = normalizeOpenRouterModel({
   id: "vendor/code-model:free",
@@ -78,6 +93,55 @@ assert.equal(groqUnknown.is_free, false);
 assert.deepEqual(groqUnknown.capabilities, []);
 assert.deepEqual(groqCapabilities("groq/compound").capabilities, ["code", "tools", "web"]);
 
+const genericUnknown = normalizeOpenAiCompatibleModel({ id: "local/model" });
+assert.equal(genericUnknown.provider, "openai_compatible");
+assert.deepEqual(genericUnknown.pricing, { input: null, output: null });
+assert.equal(genericUnknown.is_free, false);
+
+const geminiUnknown = normalizeGeminiModel({
+  name: "models/gemini-test",
+  inputTokenLimit: 1_000_000,
+  supportedGenerationMethods: ["generateContent"],
+});
+assert.equal(geminiUnknown.id, "gemini-test");
+assert.equal(geminiUnknown.is_free, false);
+assert.equal(geminiUnknown.is_zero_data_retention, false);
+assert.deepEqual(geminiUnknown.pricing, { input: null, output: null });
+
+const siliconFlowUnknown = normalizeSiliconFlowModel({ id: "vendor/chat-model" });
+assert.equal(siliconFlowUnknown.provider, "siliconflow");
+assert.equal(siliconFlowUnknown.data_boundary, "siliconflow_cloud");
+assert.equal(siliconFlowUnknown.privacy_sensitive_task_policy, "deny");
+assert.equal(siliconFlowUnknown.content_policy, "restricted");
+assert.equal(siliconFlowUnknown.is_free, false);
+assert.equal(siliconFlowUnknown.is_zero_data_retention, false);
+assert.deepEqual(siliconFlowUnknown.pricing, { input: null, output: null });
+
+assert.deepEqual(geminiContentsFromMessages([
+  { role: "system", content: "Be precise" },
+  { role: "user", content: "hello" },
+  { role: "assistant", content: "hi" },
+]), {
+  systemInstruction: { parts: [{ text: "Be precise" }] },
+  contents: [
+    { role: "user", parts: [{ text: "hello" }] },
+    { role: "model", parts: [{ text: "hi" }] },
+  ],
+});
+
+const normalizedGemini = normalizeGeminiResponse({
+  candidates: [{
+    finishReason: "STOP",
+    content: { parts: [{ text: "done" }, { functionCall: { name: "lookup", args: { id: 7 } } }] },
+  }],
+  usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 3 },
+});
+assert.equal(normalizedGemini.content, "done");
+assert.equal(normalizedGemini.tool_calls[0].function.name, "lookup");
+assert.equal(normalizedGemini.tool_calls[0].function.arguments, '{"id":7}');
+assert.equal(normalizedGemini.finish_reason, "STOP");
+assert.deepEqual(normalizedGemini.usage, { input_tokens: 10, output_tokens: 3 });
+
 assert.deepEqual(parseRateLimitHeaders(headers({
   "Retry-After": "8",
   "X-RateLimit-Limit-Requests": "100",
@@ -98,6 +162,21 @@ assert.equal(adapterForProvider("openrouter", async () => {}).isSafeFallbackStat
 assert.equal(adapterForProvider("openrouter", async () => {}).isSafeFallbackStatus(429), true);
 assert.equal(adapterForProvider("groq", async () => {}).isSafeFallbackStatus(498), true);
 assert.equal(adapterForProvider("groq", async () => {}).isAuthOrPermissionStop(401), true);
+assert.equal(adapterForProvider("siliconflow", async () => {}).isSafeFallbackStatus(429), true);
+assert.deepEqual(registeredProviders(), ["gemini", "groq", "openai", "openai_compatible", "openrouter", "siliconflow"]);
+assert.throws(() => adapterForProvider("unknown", async () => {}), /Supported: gemini, groq, openai, openai_compatible, openrouter, siliconflow/);
+
+const normalizedResponses = normalizeOpenAiResponsesResponse({
+  status: "completed",
+  output: [
+    { type: "message", content: [{ type: "output_text", text: "response-ok" }] },
+    { type: "function_call", call_id: "call-1", name: "lookup", arguments: '{"id":9}' },
+  ],
+  usage: { input_tokens: 6, output_tokens: 2 },
+});
+assert.equal(normalizedResponses.content, "response-ok");
+assert.equal(normalizedResponses.tool_calls[0].id, "call-1");
+assert.deepEqual(normalizedResponses.usage, { input_tokens: 6, output_tokens: 2 });
 
 {
   let request;
@@ -105,11 +184,95 @@ assert.equal(adapterForProvider("groq", async () => {}).isAuthOrPermissionStop(4
     request = { url, options };
     return response(200, { data: [{ id: "vendor/free", pricing: { prompt: "0", completion: "0" } }] });
   });
-  const credential = OPENROUTER_TEST_KEY;
+  const credential = OPENROUTER_TEST_CREDENTIAL;
   const models = await adapter.discoverModels({ baseUrl: "https://router.invalid/v1/", apiKey: credential });
   assert.equal(request.url, "https://router.invalid/v1/models");
-  assert.equal(request.options.headers.authorization, `Bearer ${OPENROUTER_TEST_KEY}`);
+  assert.equal(request.options.headers.authorization, `Bearer ${OPENROUTER_TEST_CREDENTIAL}`);
   assert.equal(models[0].is_free, true);
+}
+
+{
+  let request;
+  const adapter = adapterForProvider("siliconflow", async (url, options) => {
+    request = { url, options };
+    return response(200, { data: [{ id: "vendor/chat-model" }] });
+  });
+  const models = await adapter.discoverModels(credentialArgs(SILICONFLOW_TEST_CREDENTIAL));
+  assert.equal(request.url, "https://api.siliconflow.cn/v1/models?type=text&sub_type=chat");
+  assert.equal(request.options.headers.authorization, `Bearer ${SILICONFLOW_TEST_CREDENTIAL}`);
+  assert.equal(models[0].provider, "siliconflow");
+  assert.equal(models[0].is_free, false);
+}
+
+{
+  let request;
+  const adapter = adapterForProvider("openai", async (url, options) => {
+    request = { url, options };
+    return response(200, {
+      status: "completed",
+      output: [{ type: "message", content: [{ type: "output_text", text: "responses-ok" }] }],
+      usage: { input_tokens: 3, output_tokens: 1 },
+    });
+  });
+  const { response: openaiResponse } = await adapter.chatCompletion({
+    ...credentialArgs("openai-test-value"),
+    model: "test-model",
+    messages: [{ role: "user", content: "hello" }],
+    max_tokens: 8,
+  });
+  assert.equal(request.url, "https://api.openai.com/v1/responses");
+  const body = JSON.parse(request.options.body);
+  assert.equal(body.max_output_tokens, 8);
+  assert.equal(body.store, false);
+  assert.equal(adapter.parseResponse(JSON.parse(await openaiResponse.text())).content, "responses-ok");
+}
+
+{
+  let calls = 0;
+  const routerWithoutKey = createBudgetRouter();
+  const discovery = await routerWithoutKey.discoverCandidates({
+    providers: ["openai_compatible"],
+    apiKeys: {},
+    baseUrls: { openai_compatible: "http://127.0.0.1:1234/v1" },
+    fetchImpl: async () => {
+      calls += 1;
+      return response(200, { data: [{ id: "local-model" }] });
+    },
+  });
+  assert.equal(calls, 1);
+  assert.equal(discovery.candidates[0].id, "local-model");
+}
+
+{
+  const requests = [];
+  const adapter = adapterForProvider("gemini", async (url, options) => {
+    requests.push({ url, options });
+    if (url.includes("?pageSize=")) {
+      return response(200, { models: [
+        { name: "models/gemini-test", inputTokenLimit: 1000, supportedGenerationMethods: ["generateContent"] },
+        { name: "models/embed-test", supportedGenerationMethods: ["embedContent"] },
+      ] });
+    }
+    return response(200, {
+      candidates: [{ content: { parts: [{ text: "gemini-ok" }] }, finishReason: "STOP" }],
+      usageMetadata: { promptTokenCount: 8, candidatesTokenCount: 2 },
+    });
+  });
+  const models = await adapter.discoverModels(credentialArgs(GEMINI_TEST_CREDENTIAL));
+  assert.equal(models.length, 1);
+  assert.equal(requests[0].options.headers["x-goog-api-key"], GEMINI_TEST_CREDENTIAL);
+  const { response: geminiResponse } = await adapter.chatCompletion({
+    ...credentialArgs(GEMINI_TEST_CREDENTIAL),
+    model: "gemini-test",
+    messages: [{ role: "user", content: "hello" }],
+    max_tokens: 12,
+  });
+  assert.match(requests[1].url, /models\/gemini-test:generateContent$/);
+  const requestBody = JSON.parse(requests[1].options.body);
+  assert.equal(requestBody.generationConfig.maxOutputTokens, 12);
+  const parsed = adapter.parseResponse(JSON.parse(await geminiResponse.text()));
+  assert.equal(parsed.content, "gemini-ok");
+  assert.deepEqual(parsed.usage, { input_tokens: 8, output_tokens: 2 });
 }
 
 const router = createBudgetRouter();
@@ -134,6 +297,22 @@ const privacy = router.route({ candidates: [free], mode: "balanced", requirement
 assert.equal(privacy.selected, null);
 assert.equal(privacy.excluded[0].reasons[0], "privacy:zero_data_retention_not_explicitly_confirmed");
 
+const siliconFlowPolicy = router.route({
+  candidates: [siliconFlowUnknown],
+  mode: "balanced",
+  requirements: { policy_sensitive: true },
+});
+assert.equal(siliconFlowPolicy.selected, null);
+assert.equal(siliconFlowPolicy.excluded[0].reasons[0], "provider_policy:policy_sensitive_topics_disabled");
+
+const siliconFlowPrivacy = router.route({
+  candidates: [siliconFlowUnknown],
+  mode: "balanced",
+  requirements: { sensitive: true },
+});
+assert.equal(siliconFlowPrivacy.selected, null);
+assert.equal(siliconFlowPrivacy.excluded[0].reasons[0], "provider_policy:privacy_sensitive_tasks_disabled");
+
 const context = router.route({ candidates: [free], mode: "balanced", requirements: { min_context_length: 100_000 } });
 assert.equal(context.selected, null);
 assert.equal(context.excluded[0].reasons[0], "context_too_short:64000<100000");
@@ -151,7 +330,7 @@ assert.ok(scoreCandidate({ ...free, health: "unhealthy" }, "balanced").total < s
     mode: "free_only",
     requirements: { capabilities: ["code"] },
     providers: ["openrouter"],
-    apiKeys: { openrouter: OPENROUTER_TEST_KEY },
+    apiKeys: { openrouter: OPENROUTER_TEST_CREDENTIAL },
     fetchImpl: async () => { fetchCalls += 1; throw new Error("must not run"); },
     messages: [{ role: "user", content: "test" }],
     dry_run: true,
@@ -162,12 +341,75 @@ assert.ok(scoreCandidate({ ...free, health: "unhealthy" }, "balanced").total < s
 }
 
 {
+  const geminiCandidate = candidate("gemini-test", "gemini", {
+    pricing: { input: 0, output: 0 },
+    is_free: true,
+  });
+  const execution = await createBudgetRouter().execute({
+    candidates: [geminiCandidate],
+    mode: "free_only",
+    providers: ["gemini"],
+    apiKeys: { gemini: GEMINI_TEST_CREDENTIAL },
+    baseUrls: { gemini: "https://gemini.invalid/v1beta" },
+    fetchImpl: async () => response(200, {
+      candidates: [{ content: { parts: [{ text: "native" }] }, finishReason: "STOP" }],
+      usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 1 },
+    }),
+    messages: [{ role: "user", content: "test" }],
+    dry_run: false,
+  });
+  assert.equal(execution.result.protocol, "gemini_generate_content");
+  assert.equal(execution.result.content, "native");
+  assert.deepEqual(execution.result.usage, { input_tokens: 5, output_tokens: 1 });
+}
+
+for (const status of [429, 500, 503]) {
+  let calls = 0;
+  const models = [
+    candidate(`gemini-a-${status}`, "gemini", { pricing: { input: 0, output: 0 }, is_free: true }),
+    candidate(`gemini-b-${status}`, "gemini", { pricing: { input: 0, output: 0 }, is_free: true }),
+  ];
+  const execution = await createBudgetRouter().execute({
+    candidates: models,
+    mode: "free_only",
+    providers: ["gemini"],
+    apiKeys: { gemini: GEMINI_TEST_CREDENTIAL },
+    fetchImpl: async () => (++calls === 1
+      ? response(status, { error: { status: "RESOURCE_EXHAUSTED" } })
+      : response(200, { candidates: [{ content: { parts: [{ text: "fallback" }] } }] })),
+    messages: [{ role: "user", content: "test" }],
+    dry_run: false,
+  });
+  assert.equal(calls, 2);
+  assert.equal(execution.result.content, "fallback");
+}
+
+for (const status of [400, 401, 403]) {
+  let calls = 0;
+  const models = [
+    candidate(`gemini-stop-a-${status}`, "gemini", { pricing: { input: 0, output: 0 }, is_free: true }),
+    candidate(`gemini-stop-b-${status}`, "gemini", { pricing: { input: 0, output: 0 }, is_free: true }),
+  ];
+  const execution = await createBudgetRouter().execute({
+    candidates: models,
+    mode: "free_only",
+    providers: ["gemini"],
+    apiKeys: { gemini: GEMINI_TEST_CREDENTIAL },
+    fetchImpl: async () => { calls += 1; return response(status, { error: "stop" }); },
+    messages: [{ role: "user", content: "test" }],
+    dry_run: false,
+  });
+  assert.equal(calls, 1);
+  assert.equal(execution.attempts[0].stopped, true);
+}
+
+{
   let requestedUrl;
   const execution = await router.execute({
     candidates: [free],
     mode: "free_only",
     providers: ["openrouter"],
-    apiKeys: { openrouter: OPENROUTER_TEST_KEY },
+    apiKeys: { openrouter: OPENROUTER_TEST_CREDENTIAL },
     baseUrls: { openrouter: "https://custom.invalid/api" },
     fetchImpl: async (url) => { requestedUrl = url; return response(200, successBody("success")); },
     messages: [{ role: "user", content: "test" }],
@@ -186,7 +428,7 @@ for (const status of [402, 429, 502, 503]) {
     candidates: [first, second],
     mode: "free_only",
     providers: ["openrouter"],
-    apiKeys: { openrouter: OPENROUTER_TEST_KEY },
+    apiKeys: { openrouter: OPENROUTER_TEST_CREDENTIAL },
     fetchImpl: async () => {
       calls += 1;
       return calls === 1
@@ -209,7 +451,7 @@ for (const status of [402, 429, 502, 503]) {
     candidates: models,
     mode: "balanced",
     providers: ["groq"],
-    apiKeys: { groq: GROQ_TEST_KEY },
+    apiKeys: { groq: GROQ_TEST_CREDENTIAL },
     fetchImpl: async () => (++calls === 1 ? response(498, { error: "capacity" }) : response(200, successBody("groq-fallback"))),
     messages: [{ role: "user", content: "test" }],
     dry_run: false,
@@ -224,7 +466,7 @@ for (const status of [400, 401, 403, 404]) {
     candidates: [candidate(`stop-${status}-a`), candidate(`stop-${status}-b`)],
     mode: "free_only",
     providers: ["openrouter"],
-    apiKeys: { openrouter: OPENROUTER_TEST_KEY },
+    apiKeys: { openrouter: OPENROUTER_TEST_CREDENTIAL },
     fetchImpl: async () => { calls += 1; return response(status, { error: "stop" }); },
     messages: [{ role: "user", content: "test" }],
     dry_run: false,
@@ -240,13 +482,13 @@ for (const status of [400, 401, 403, 404]) {
     candidates: [candidate("network-a"), candidate("network-b")],
     mode: "free_only",
     providers: ["openrouter"],
-    apiKeys: { openrouter: OPENROUTER_TEST_KEY },
-    fetchImpl: async () => { calls += 1; throw new Error(`socket failed ${OPENROUTER_TEST_KEY}`); },
+    apiKeys: { openrouter: OPENROUTER_TEST_CREDENTIAL },
+    fetchImpl: async () => { calls += 1; throw new Error(`socket failed ${OPENROUTER_TEST_CREDENTIAL}`); },
     messages: [{ role: "user", content: "test" }],
     dry_run: false,
   });
   assert.equal(calls, 1);
-  assert.equal(execution.error.includes(OPENROUTER_TEST_KEY), false);
+  assert.equal(execution.error.includes(OPENROUTER_TEST_CREDENTIAL), false);
   assert.equal(execution.error.includes("***REDACTED***"), true);
 }
 
@@ -273,7 +515,7 @@ for (const status of [400, 401, 403, 404]) {
     mode: "free_only",
     requirements: { capabilities: ["code"] },
     providers: ["openrouter"],
-    apiKeys: { openrouter: OPENROUTER_TEST_KEY },
+    apiKeys: { openrouter: OPENROUTER_TEST_CREDENTIAL },
     messages: [{ role: "user", content: "test" }],
     dry_run: true,
   });
@@ -289,7 +531,7 @@ for (const status of [400, 401, 403, 404]) {
     candidates: [first, second],
     mode: "free_only",
     providers: ["openrouter"],
-    apiKeys: { openrouter: OPENROUTER_TEST_KEY },
+    apiKeys: { openrouter: OPENROUTER_TEST_CREDENTIAL },
     fetchImpl: async () => (++calls === 1 ? response(429, { error: "limited" }) : response(200, successBody())),
     messages: [{ role: "user", content: "test" }],
     dry_run: false,
@@ -299,4 +541,4 @@ for (const status of [400, 401, 403, 404]) {
   assert.equal(persistent.runtimeState["openrouter:health-a"].updated_at, 123);
 }
 
-console.log("Budget-aware provider routing: 39 offline scenarios passed");
+console.log("Budget-aware provider routing: registered OpenRouter, Groq, Gemini, SiliconFlow, OpenAI Responses, and generic OpenAI-compatible scenarios passed");

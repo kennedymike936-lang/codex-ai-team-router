@@ -29,7 +29,7 @@ The project is designed for Windows-based maintainer workflows. It combines mode
 - Codex Desktop or another MCP-compatible Codex environment
 - At least one supported provider API key
 
-Optional worker harnesses include Qwen Code CLI and Claude Code CLI.
+The optional local worker harness is Qwen Code CLI. It runs both Qwen and DeepSeek through isolated OpenAI-compatible provider settings; Claude Code is not required.
 
 ## Install
 
@@ -63,11 +63,19 @@ DEEPSEEK_MCP_BASE_URL = 'https://api.deepseek.com/anthropic'
 XAI_MCP_BASE_URL = 'https://api.x.ai/v1'
 OPENROUTER_MCP_BASE_URL = 'https://openrouter.ai/api/v1'
 GROQ_MCP_BASE_URL = 'https://api.groq.com/openai/v1'
+GEMINI_MCP_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta'
+SILICONFLOW_MCP_BASE_URL = 'https://api.siliconflow.cn/v1'
 ```
 
 Provider keys are read from environment variables. Do not put keys in the repository, prompts, or Codex configuration examples.
 
-`budget_route` reads `OPENROUTER_API_KEY` and `GROQ_API_KEY`. It defaults to `dry_run=true`; a preview may call `/models`, but it never sends a chat-completion request. Set `AI_TEAM_OPENROUTER_FREE_FALLBACK=true` only if you intentionally want `openrouter/free` considered in `free_only` mode. Verified per-model capability, privacy, latency, or quality metadata can be supplied as JSON through `AI_TEAM_MODEL_METADATA_JSON`; see the example config.
+Network failures are classified as DNS, connect timeout/refusal, unreachable network, reset connection, TLS, request timeout, or unknown fetch failure. Safely replayable failures receive at most one bounded retry. Paid POST requests are not replayed after a reset or timeout when delivery is uncertain. Configure only a trusted HTTP/HTTPS proxy through `AI_TEAM_TRUSTED_PROXY_URL` or standard `HTTPS_PROXY` / `HTTP_PROXY` variables. `AI_TEAM_PROXY_MODE` accepts `fallback` (default), `always`, or `off`; public proxy discovery is intentionally unsupported. Proxy URLs and credentials are never included in diagnostics.
+
+On Windows, `scripts/codex-proxy-health.ps1 -JsonOnly` can check the currently configured trusted local system proxy against xAI, Grok, and GitHub. It does not read subscriptions, discover public proxies, switch nodes, expose proxy URLs, or disable TLS verification.
+
+`budget_route` reads the key for each selected provider, including `OPENROUTER_API_KEY`, `GROQ_API_KEY`, `GEMINI_API_KEY`, and `SILICONFLOW_API_KEY`. It defaults to `dry_run=true`; a preview may call a provider's model-list endpoint, but it never sends a generation request. Set `AI_TEAM_OPENROUTER_FREE_FALLBACK=true` only if you intentionally want `openrouter/free` considered in `free_only` mode. Verified per-model capability, privacy, latency, price, or quality metadata can be supplied as JSON through `AI_TEAM_MODEL_METADATA_JSON`; see the example config.
+
+SiliconFlow is treated as its own cloud data and content-policy boundary, regardless of whether a hosted model ID names Qwen, DeepSeek, or another upstream family. It is opt-in rather than a default provider. Unknown prices are not treated as free. Mark private or confidential work with `sensitive=true`, and work subject to provider/jurisdiction content restrictions with `policy_sensitive=true`; SiliconFlow is excluded for either category. Provider routing must not be used to evade applicable law or provider policy.
 
 ## Example
 
@@ -96,7 +104,8 @@ Preview budget-aware routing:
   "requirements": {
     "capabilities": ["code", "tools"],
     "min_context_length": 32000,
-    "sensitive": false
+    "sensitive": false,
+    "policy_sensitive": false
   },
   "dry_run": true
 }
