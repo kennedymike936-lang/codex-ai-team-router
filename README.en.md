@@ -11,7 +11,7 @@ The project is designed for Windows-based maintainer workflows. It combines mode
 ## What it provides
 
 - One MCP server with five tools: `delegate_task`, `grok_search`, `budget_route`, `project_task`, and `worker_gate_review`.
-- Automatic routing between Qwen and DeepSeek based on task type and complexity.
+- Automatic routing between Qwen and DeepSeek, plus an optional official Grok Build CLI worker for complex implementation tasks.
 - Optional read-only Web/X research through Grok Search.
 - Staged multi-agent work: read-only planning, one writing worker, then deterministic validation.
 - Bounded working directories and optional allowed-path enforcement.
@@ -30,6 +30,8 @@ The project is designed for Windows-based maintainer workflows. It combines mode
 - At least one supported provider API key
 
 The optional local worker harness is Qwen Code CLI. It runs both Qwen and DeepSeek through isolated OpenAI-compatible provider settings; Claude Code is not required.
+
+Grok Build is a second optional harness. Install it with xAI's official Windows installer (`irm https://x.ai/cli/install.ps1 | iex`), run `grok login` (or `grok login --device-auth`), then set `AI_TEAM_GROK_BUILD_ENABLED=true` and `AI_TEAM_GROK_BUILD_AUTH=account`. The router checks only whether the official session file exists; it never reads or copies it. Account mode removes `XAI_API_KEY` from the child process so a free Build allowance cannot silently fall through to paid API credit.
 
 ## Install
 
@@ -61,6 +63,8 @@ startup_timeout_sec = 60
 QWEN_MCP_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
 DEEPSEEK_MCP_BASE_URL = 'https://api.deepseek.com/anthropic'
 XAI_MCP_BASE_URL = 'https://api.x.ai/v1'
+AI_TEAM_GROK_BUILD_ENABLED = 'false'
+AI_TEAM_GROK_BUILD_AUTH = 'account'
 OPENROUTER_MCP_BASE_URL = 'https://openrouter.ai/api/v1'
 GROQ_MCP_BASE_URL = 'https://api.groq.com/openai/v1'
 GEMINI_MCP_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta'

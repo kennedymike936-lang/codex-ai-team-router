@@ -603,7 +603,7 @@ const tools = [
   },
   {
     name: "project_task",
-    description: "Delegate one whole local project phase to an automatically sized AI team. Small work uses one coding assistant; broader work adds a read-only planner; complex time-sensitive work can also add Grok research. Retryable worker failures can switch once to an independent assistant/harness. Implementation is noninteractive and can run the deterministic quality gate.",
+    description: "Delegate one whole local project phase to an automatically sized AI team. Small work uses one coding assistant; broader work adds a read-only planner; complex implementation can use an explicitly enabled official Grok Build CLI, while time-sensitive work can add read-only Grok research. Retryable worker failures can switch once to an independent assistant/harness. Implementation is noninteractive and can run the deterministic quality gate.",
     inputSchema: {
       type: "object",
       properties: {
@@ -611,7 +611,7 @@ const tools = [
         cwd: { type: "string", minLength: 1 },
         task_id: { type: "string" },
         mode: { type: "string", enum: ["auto", "inspect", "implement"] },
-        preferred: { type: "string", enum: ["auto", "qwen", "deepseek"] },
+        preferred: { type: "string", enum: ["auto", "qwen", "deepseek", "grok"] },
         max_assistants: { type: "integer", minimum: 1, maximum: 3 },
         budget: { type: "string", enum: ["low", "normal", "deep"] },
         allowed_paths: {
@@ -670,7 +670,7 @@ const tools = [
   },
   {
     name: "doctor",
-    description: "Read-only diagnostic of local AI Team configuration and tool availability. Reports Node, PowerShell, Git, Qwen harness availability, per-provider configuration (presence only, never values), and trusted HTTP/HTTPS or Windows system proxy presence. Never makes paid model calls, never writes to environment/registry/system, and never changes proxies. Public proxy discovery and TLS verification bypass are forbidden.",
+    description: "Read-only diagnostic of local AI Team configuration and tool availability. Reports Node, PowerShell, Git, Qwen/Grok Build harness availability, Grok account-session presence, per-provider configuration (presence only, never values), and trusted HTTP/HTTPS or Windows system proxy presence. Never reads login files, makes paid model calls, writes to environment/registry/system, or changes proxies. Public proxy discovery and TLS verification bypass are forbidden.",
     inputSchema: {
       type: "object",
       properties: {},

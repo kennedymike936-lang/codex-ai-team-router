@@ -14,6 +14,7 @@ All notable changes to this project will be documented here. The format follows 
 - Exact run-local Qwen request accounting, including cached versus uncached input, thinking tokens, provider API time, and per-request breakdowns after partial or timed-out runs.
 - Read-only `doctor` diagnostics for local runtimes, AI harness commands, provider credential presence, and trusted proxy presence without exposing credential or proxy values.
 - A read-only Windows trusted-proxy health check that tests the user-configured local proxy without reading subscriptions, discovering public proxies, switching nodes, or bypassing TLS.
+- Optional official Grok Build CLI harness with prompt-file input, final JSON/usage parsing, workspace sandboxing, account-auth billing isolation, and complex-task routing behind an explicit enable flag.
 
 ### Changed
 
@@ -23,7 +24,7 @@ All notable changes to this project will be documented here. The format follows 
 
 ### Fixed
 
-- DeepSeek's Claude-compatible harness now receives the worker task through explicit text stdin instead of a long positional argument, preventing the Windows three-second stdin initialization failure.
+- DeepSeek's isolated Qwen Code harness now receives the worker task through explicit text stdin instead of a long positional argument, preventing the Windows three-second stdin initialization failure.
 - Isolated Qwen workers now create their own minimal settings file and use a stable prompt file, avoiding inherited configuration noise and command-line truncation.
 - Read-only Scouts now use a bounded mechanical preflight by default and receive 4/5/7-turn budgets with an explicit tool-free final answer turn.
 - DeepSeek workers now always use the isolated Qwen Code OpenAI-compatible harness, removing the unavailable Claude compatibility path and accepting `DEEPSEEK_API_KEY` directly.
@@ -35,6 +36,7 @@ All notable changes to this project will be documented here. The format follows 
 - Gemini unpaid/free candidates are not treated as zero-data-retention, and provider Base URLs cannot be supplied by task input.
 - SiliconFlow is excluded from privacy-sensitive and policy-sensitive tasks and is never inferred to be a direct connection to its hosted model vendor.
 - Public proxy discovery, TLS verification bypass, proxy credential disclosure, and uncertain paid-POST replay are explicitly prohibited.
+- Grok Build account mode removes `XAI_API_KEY` from the child process; login, region, 429, and exhausted-allowance failures stop without account rotation or automatic top-up.
 
 ## [0.7.0] - 2026-08-11
 

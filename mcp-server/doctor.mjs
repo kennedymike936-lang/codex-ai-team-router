@@ -1,4 +1,7 @@
 import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 // Diagnostic-only. Presence checks return booleans; values are never read,
 // copied, logged, or returned. No paid model calls, no writes, no proxy edits.
@@ -22,6 +25,7 @@ export const DIAGNOSTIC_ONLY =
 
 const HARNESS_COMMANDS = [
   { command: "qwen", label: "Qwen harness" },
+  { command: "grok", label: "Grok Build harness" },
 ];
 
 function defaultExec(file, args) {
@@ -92,6 +96,8 @@ export function runDoctor(options = {}) {
   const platform = options.platform || process.platform;
   const envPresence = options.envPresence || ((name) => defaultEnvPresence(name, env, exec, platform));
   const systemProxyPresence = options.systemProxyPresence ?? defaultSystemProxyPresence(exec, platform);
+  const grokAccountPresence = options.grokAccountPresence
+    ?? existsSync(join(homedir(), ".grok", "auth.json"));
 
   const findings = [];
   const add = (severity, message, suggestion = null) => {
@@ -125,7 +131,9 @@ export function runDoctor(options = {}) {
   );
 
   const harness = HARNESS_COMMANDS.map(({ command, label }) => {
-    const available = commandExists(command, exec, platform);
+    const managedGrokAvailable = command === "grok"
+      && existsSync(join(homedir(), ".grok", "bin", platform === "win32" ? "grok.exe" : "grok"));
+    const available = managedGrokAvailable || commandExists(command, exec, platform);
     if (available) {
       add("pass", `${label} command is available (${command})`);
     } else {
@@ -133,6 +141,24 @@ export function runDoctor(options = {}) {
     }
     return { command, label, available };
   });
+
+  const grokCommandAvailable = Boolean(harness.find((item) => item.command === "grok")?.available);
+  const grokEnabled = /^(?:1|true|yes|on)$/i.test(String(env.AI_TEAM_GROK_BUILD_ENABLED || "").trim());
+  const grokAuthMode = String(env.AI_TEAM_GROK_BUILD_AUTH || "account").trim().toLowerCase() === "api_key"
+    ? "api_key"
+    : "account";
+  const grokBuild = {
+    enabled: grokEnabled,
+    command_available: grokCommandAvailable,
+    account_session_present: Boolean(grokAccountPresence),
+    auth_mode: grokAuthMode,
+    ready: grokEnabled && grokCommandAvailable && (grokAuthMode === "api_key" ? envPresence("XAI_API_KEY") : Boolean(grokAccountPresence)),
+  };
+  if (grokBuild.ready) {
+    add("pass", "Grok Build is enabled and its selected authentication mode is present.");
+  } else if (grokEnabled) {
+    add("warn", "Grok Build is enabled but not ready.", "Install the official Grok CLI and complete its login, or explicitly configure api_key auth.");
+  }
 
   const providers = Object.entries(PROVIDER_ENV_VARS).map(([provider, names]) => {
     const configured = names.some((name) => envPresence(name));
@@ -183,6 +209,7 @@ export function runDoctor(options = {}) {
     summary,
     runtime,
     harness,
+    grok_build: grokBuild,
     providers,
     proxy,
     findings,

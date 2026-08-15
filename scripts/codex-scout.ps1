@@ -7,7 +7,7 @@ param(
 
   [string]$Cwd = (Get-Location).Path,
 
-  [ValidateSet("auto", "qwen", "deepseek")]
+  [ValidateSet("auto", "qwen", "deepseek", "grok")]
   [string]$Worker = "auto",
 
   [string]$MaxWallTime = "5m",

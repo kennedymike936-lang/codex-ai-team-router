@@ -18,6 +18,18 @@ function Invoke-UsageParser {
   return (($raw -join "`n") | ConvertFrom-Json)
 }
 
+function Invoke-GrokParser {
+  param([string]$Json, [string]$ErrorText = "")
+  $jsonPath = Join-Path $fixture "grok-result.json"
+  $errorPath = Join-Path $fixture "grok-stderr.txt"
+  $textPath = Join-Path $fixture "grok-text.txt"
+  $Json | Set-Content -LiteralPath $jsonPath -Encoding UTF8
+  $ErrorText | Set-Content -LiteralPath $errorPath -Encoding UTF8
+  $raw = & $worker -Worker grok -Task "grok parser fixture" -GrokParseOnly `
+    -GrokParseJsonPath $jsonPath -GrokParseErrorPath $errorPath -GrokParseTextPath $textPath -JsonOnly
+  return (($raw -join "`n") | ConvertFrom-Json)
+}
+
 try {
   New-Item -ItemType Directory -Force -Path $fixture | Out-Null
 
@@ -73,6 +85,21 @@ try {
 
   Write-Host "Worker usage parser: 5 fixtures passed"
 
+  # Fixture 6 - official Grok Build final JSON shape.
+  $grokReported = Invoke-GrokParser -Json '{"text":"done","stopReason":"end_turn","sessionId":"session-fixture","num_turns":3,"usage":{"input_tokens":40,"cache_read_input_tokens":10,"cache_creation_input_tokens":2,"output_tokens":9,"reasoning_tokens":4},"total_cost_usd":0.01,"total_cost_usd_ticks":100000000}'
+  if (-not $grokReported.parsed -or $grokReported.total_tokens -ne 61 -or $grokReported.cache_read_tokens -ne 10 -or $grokReported.cache_creation_tokens -ne 2 -or $grokReported.uncached_input_tokens -ne 40 -or $grokReported.thinking_tokens -ne 4 -or $grokReported.num_turns -ne 3 -or $grokReported.actual_cost -ne 0.01 -or $grokReported.actual_cost_ticks -ne 100000000 -or $grokReported.stop_reason -ne "end_turn") {
+    throw "Grok Build JSON fixture: expected exact structured usage and cost."
+  }
+  $grokFailed = Invoke-GrokParser -Json "" -ErrorText "login required"
+  if ($grokFailed.parsed -or -not $grokFailed.is_error -or $null -ne $grokFailed.total_tokens) {
+    throw "Grok Build failure fixture: usage must remain unavailable."
+  }
+  $grokRecovered = Invoke-GrokParser -Json '{"type":"error","message":"turn failed","num_turns":1,"usage":{"input_tokens":6,"cache_read_input_tokens":2,"output_tokens":1},"total_cost_usd":0.001}'
+  if (-not $grokRecovered.parsed -or -not $grokRecovered.is_error -or $grokRecovered.availability -ne "recovered" -or $grokRecovered.total_tokens -ne 9 -or $grokRecovered.actual_cost -ne 0.001) {
+    throw "Grok Build failure fixture: expected frozen failure usage recovery."
+  }
+  Write-Host "Fixture 6 (Grok Build JSON): passed"
+
   # Source-level safe-mode assertions (line-based to avoid nested-paren issues)
   $sourcePath = Join-Path $PSScriptRoot "codex-worker.ps1"
   $sourceLines = Get-Content -LiteralPath $sourcePath
@@ -87,8 +114,14 @@ try {
   foreach ($requiredReliabilityText in @("Do not start another large generated file", "complete and validate one allowed file", 'DEEPSEEK_API_KEY', 'ReadAllText($promptPath) | & qwen @deepSeekArgs', 'contextWindowSize = 1000000', '2> $qwenErrorPath')) {
     if (-not $sourceText.Contains($requiredReliabilityText)) { throw "Missing worker reliability behavior: $requiredReliabilityText" }
   }
-  if ($sourceText -match '(?i)claude|DeepSeekHarness|DeepSeekMaxBudgetUsd') {
+  if ($sourceText -match '(?i)Get-Command\s+claude|&\s*claude|DeepSeekHarness|DeepSeekMaxBudgetUsd') {
     throw "Claude compatibility code must not remain in the unified Qwen harness worker."
+  }
+  foreach ($requiredGrokText in @('"--prompt-file"', '"--no-auto-update"', '"--output-format", "json"', '"--sandbox", "workspace"', '"--no-subagents"', 'GrokBuildAuth -eq "account"')) {
+    if (-not $sourceText.Contains($requiredGrokText)) { throw "Missing Grok Build safety behavior: $requiredGrokText" }
+  }
+  if ($sourceText -match '(?i)Get-Content[^\n]*auth\.json|Invoke-RestMethod[^\n]*auth\.json|public proxy|tls.*bypass') {
+    throw "Grok Build harness must not read auth sessions or discover/bypass proxies."
   }
 
   function Test-ArgArrayHasFlag {
