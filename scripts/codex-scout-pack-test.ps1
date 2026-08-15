@@ -48,7 +48,7 @@ try {
   try {
     Remove-Item Env:AI_TEAM_SCOUT_PACK -ErrorAction SilentlyContinue
     $focusedMode = ((& $scoutScript -Task "Locate the package version" -PackModeOnly -JsonOnly) -join "`n") | ConvertFrom-Json
-    if ($focusedMode.enabled -or $focusedMode.reason -notmatch "auto skipped") { throw "Expected focused inspection to skip Scout Pack in AUTO mode." }
+    if (-not $focusedMode.enabled -or $focusedMode.reason -notmatch "bounded mechanical preflight") { throw "Expected focused inspection to use the bounded Scout Pack in AUTO mode." }
 
     $broadMode = ((& $scoutScript -Task "Explain the staged architecture workflow across modules" -PackModeOnly -JsonOnly) -join "`n") | ConvertFrom-Json
     if (-not $broadMode.enabled -or $broadMode.reason -notmatch "auto enabled") { throw "Expected broad workflow inspection to enable Scout Pack in AUTO mode." }

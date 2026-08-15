@@ -33,11 +33,6 @@ param(
 
   [string]$DeepSeekModel = "auto",
 
-  [ValidateSet("qwen", "claude")]
-  [string]$DeepSeekHarness = "qwen",
-
-  [decimal]$DeepSeekMaxBudgetUsd = 0.10,
-
   [string]$OutRoot = (Join-Path $env:USERPROFILE ".codex-ai-team\runs"),
 
   [string]$UsageLedger = (Join-Path $env:USERPROFILE ".codex-ai-team\usage\worker-runs.jsonl"),
@@ -423,7 +418,6 @@ $taskPath = Join-Path $runDir "task.txt"
 $resultPath = Join-Path $runDir "result.txt"
 $structuredResultPath = Join-Path $runDir "qwen-result.json"
 $qwenErrorPath = Join-Path $runDir "qwen-stderr.txt"
-$claudeErrorPath = Join-Path $runDir "claude-stderr.txt"
 $summaryPath = Join-Path $runDir "summary.txt"
 $metaPath = Join-Path $runDir "meta.txt"
 $workerResultPath = Join-Path $runDir "worker-result.json"
@@ -466,7 +460,7 @@ $meta += "Cwd: $Cwd"
 $meta += "RunDir: $runDir"
 $meta += "Approval: $Approval"
 $meta += "Budget: $Budget"
-$meta += "DeepSeekHarness: $DeepSeekHarness"
+$meta += "Harness: qwen"
 $meta += "MaxWallTime: $MaxWallTime"
 $meta += "MaxSessionTurns: $MaxSessionTurns"
 $meta += "AllowedPath: $($AllowedPath -join ', ')"
@@ -551,16 +545,15 @@ try {
   }
 
   if ($Worker -eq "deepseek") {
-    $authToken = Get-EnvValue "ANTHROPIC_AUTH_TOKEN"
-    $apiKey = Get-EnvValue "ANTHROPIC_API_KEY"
+    $apiKey = Get-EnvValue "DEEPSEEK_API_KEY"
     if ([string]::IsNullOrWhiteSpace($apiKey)) {
-      $apiKey = $authToken
-    }
-    if ([string]::IsNullOrWhiteSpace($authToken)) {
-      $authToken = $apiKey
+      $apiKey = Get-EnvValue "ANTHROPIC_API_KEY"
     }
     if ([string]::IsNullOrWhiteSpace($apiKey)) {
-      throw "ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN is not configured."
+      $apiKey = Get-EnvValue "ANTHROPIC_AUTH_TOKEN"
+    }
+    if ([string]::IsNullOrWhiteSpace($apiKey)) {
+      throw "DEEPSEEK_API_KEY, ANTHROPIC_API_KEY, or ANTHROPIC_AUTH_TOKEN is not configured."
     }
 
     $deepSeekBaseUrl = Get-EnvValue "DEEPSEEK_MCP_BASE_URL"
@@ -570,122 +563,61 @@ try {
     if ([string]::IsNullOrWhiteSpace($deepSeekBaseUrl)) {
       $deepSeekBaseUrl = "https://api.deepseek.com/anthropic"
     }
-    $env:ANTHROPIC_BASE_URL = $deepSeekBaseUrl
     $selectedModel = Resolve-ValueModel -Provider "deepseek" -RequestedModel $DeepSeekModel -BudgetTier $Budget -BaseUrl $deepSeekBaseUrl -ApiKey $apiKey
-    $env:ANTHROPIC_AUTH_TOKEN = $authToken
-    $env:ANTHROPIC_API_KEY = $apiKey
-    $env:ANTHROPIC_MODEL = $selectedModel
-    $env:ANTHROPIC_DEFAULT_OPUS_MODEL = $selectedModel
-    $env:ANTHROPIC_DEFAULT_SONNET_MODEL = $selectedModel
-    $env:ANTHROPIC_DEFAULT_HAIKU_MODEL = "deepseek-v4-flash"
-    $env:CLAUDE_CODE_SUBAGENT_MODEL = "deepseek-v4-flash"
-
-    if ($DeepSeekHarness -eq "qwen") {
-      $deepSeekOpenAiBase = ($deepSeekBaseUrl -replace "/anthropic(?:/v1)?/?$", "").TrimEnd("/")
-      $env:OPENAI_API_KEY = $apiKey
-      $env:OPENAI_BASE_URL = $deepSeekOpenAiBase
-      $qwenHome = Join-Path $runDir "qwen-home"
-      New-Item -ItemType Directory -Force -Path $qwenHome | Out-Null
-      $env:QWEN_HOME = $qwenHome
-      $qwenSettings = [ordered]@{
-        modelProviders = [ordered]@{
-          openai = @([ordered]@{
-            id = $selectedModel
-            name = "$selectedModel (DeepSeek auto)"
-            envKey = "OPENAI_API_KEY"
-            baseUrl = $deepSeekOpenAiBase
-            generationConfig = [ordered]@{
-              contextWindowSize = 1000000
-              timeout = 120000
-              samplingParams = [ordered]@{ max_tokens = 8192 }
-            }
-          })
-        }
-        security = [ordered]@{ auth = [ordered]@{ selectedType = "openai" } }
-        model = [ordered]@{ name = $selectedModel }
+    $deepSeekOpenAiBase = ($deepSeekBaseUrl -replace "/anthropic(?:/v1)?/?$", "").TrimEnd("/")
+    $env:OPENAI_API_KEY = $apiKey
+    $env:OPENAI_BASE_URL = $deepSeekOpenAiBase
+    $qwenHome = Join-Path $runDir "qwen-home"
+    New-Item -ItemType Directory -Force -Path $qwenHome | Out-Null
+    $env:QWEN_HOME = $qwenHome
+    $qwenSettings = [ordered]@{
+      modelProviders = [ordered]@{
+        openai = @([ordered]@{
+          id = $selectedModel
+          name = "$selectedModel (DeepSeek auto)"
+          envKey = "OPENAI_API_KEY"
+          baseUrl = $deepSeekOpenAiBase
+          generationConfig = [ordered]@{
+            contextWindowSize = 1000000
+            timeout = 120000
+            samplingParams = [ordered]@{ max_tokens = 8192 }
+          }
+        })
       }
-      $settingsPath = Join-Path $qwenHome "settings.json"
-      $settingsJson = $qwenSettings | ConvertTo-Json -Depth 8
-      [System.IO.File]::WriteAllText($settingsPath, $settingsJson, (New-Object System.Text.UTF8Encoding($false)))
-      $deepSeekArgs = @(
-        # Avoid Windows command-line truncation for long task and Scout Pack
-        # context. Qwen Code appends piped stdin to this headless prompt.
-        "--prompt", "Follow the complete task instructions provided on standard input.",
-        "--auth-type", "openai",
-        "--model", $selectedModel,
-        "--approval-mode", $Approval,
-        "--max-wall-time", $MaxWallTime,
-        "--max-session-turns", ([string]$MaxSessionTurns),
-        "--safe-mode",
-        "--output-format", "stream-json"
-      )
-      $previousErrorAction = $ErrorActionPreference
-      try {
-        # See the Qwen branch above: preserve native stderr for the parser
-        # instead of letting Windows PowerShell terminate on its first line.
-        $ErrorActionPreference = "Continue"
-        [System.IO.File]::ReadAllText($promptPath) | & qwen @deepSeekArgs 1> $structuredResultPath 2> $qwenErrorPath
-        $workerExitCode = $LASTEXITCODE
-      } finally {
-        $ErrorActionPreference = $previousErrorAction
-      }
-      $qwenMetrics = Convert-QwenJsonOutput -JsonPath $structuredResultPath -ErrorPath $qwenErrorPath -ProviderLedgerPath (Join-Path $qwenHome "usage") -TextPath $resultPath
-      if (-not $qwenMetrics) {
-        $workerExitCode = 1
-        $workerError = "Qwen structured output could not be parsed."
-      } elseif ($qwenMetrics.is_error) {
-        $workerError = $qwenMetrics.error_message
-      }
-    } else {
-      $permissionMode = "auto"
-      if ($Approval -eq "yolo") {
-        $permissionMode = "bypassPermissions"
-      } elseif ($Approval -eq "plan") {
-        $permissionMode = "plan"
-      } elseif ($Approval -eq "default") {
-        $permissionMode = "default"
-      }
-
-      $claudeArgs = @(
-        "--print",
-        "--bare",
-        "--input-format", "text",
-        "--model", $selectedModel,
-        "--permission-mode", $permissionMode,
-        "--max-budget-usd", ([string]$DeepSeekMaxBudgetUsd),
-        "--append-system-prompt", "Answer for Codex. Be concise. Codex is final reviewer."
-      )
-      # Claude print mode reads the complete task from stdin. Supplying it as a
-      # positional argument caused the Windows shim/native CLI pair to start its
-      # stdin watchdog with no data and abort after three seconds.
-      $previousErrorAction = $ErrorActionPreference
-      $previousContextTokens = $env:CLAUDE_CODE_MAX_CONTEXT_TOKENS
-      try {
-        # Value-platform DeepSeek v4 models are configured with a 1M context in
-        # the Qwen harness above. Apply the same mapping only to this child run
-        # so Claude Code does not guess a 200k window for an unknown model name.
-        if ([string]::IsNullOrWhiteSpace($previousContextTokens) -and $selectedModel -match '^deepseek-v4-(?:flash|pro)$') {
-          $env:CLAUDE_CODE_MAX_CONTEXT_TOKENS = "1000000"
-        }
-        # Claude Code writes advisory diagnostics (including unknown-model
-        # context guidance) to stderr. Windows PowerShell must not promote those
-        # warnings to terminating ErrorRecords; the native exit code remains the
-        # authoritative success signal.
-        $ErrorActionPreference = "Continue"
-        [System.IO.File]::ReadAllText($promptPath) | & claude @claudeArgs 1> $resultPath 2> $claudeErrorPath
-        $workerExitCode = $LASTEXITCODE
-      } finally {
-        $ErrorActionPreference = $previousErrorAction
-        if ($null -eq $previousContextTokens) {
-          Remove-Item Env:CLAUDE_CODE_MAX_CONTEXT_TOKENS -ErrorAction SilentlyContinue
-        } else {
-          $env:CLAUDE_CODE_MAX_CONTEXT_TOKENS = $previousContextTokens
-        }
-      }
-      if ($workerExitCode -ne 0 -and (Test-Path -LiteralPath $claudeErrorPath)) {
-        $claudeFailure = (Get-Content -LiteralPath $claudeErrorPath -Raw -ErrorAction SilentlyContinue).Trim()
-        if (-not [string]::IsNullOrWhiteSpace($claudeFailure)) { $workerError = $claudeFailure }
-      }
+      security = [ordered]@{ auth = [ordered]@{ selectedType = "openai" } }
+      model = [ordered]@{ name = $selectedModel }
+    }
+    $settingsPath = Join-Path $qwenHome "settings.json"
+    $settingsJson = $qwenSettings | ConvertTo-Json -Depth 8
+    [System.IO.File]::WriteAllText($settingsPath, $settingsJson, (New-Object System.Text.UTF8Encoding($false)))
+    $deepSeekArgs = @(
+      # Avoid Windows command-line truncation for long task and Scout Pack
+      # context. Qwen Code appends piped stdin to this headless prompt.
+      "--prompt", "Follow the complete task instructions provided on standard input.",
+      "--auth-type", "openai",
+      "--model", $selectedModel,
+      "--approval-mode", $Approval,
+      "--max-wall-time", $MaxWallTime,
+      "--max-session-turns", ([string]$MaxSessionTurns),
+      "--safe-mode",
+      "--output-format", "stream-json"
+    )
+    $previousErrorAction = $ErrorActionPreference
+    try {
+      # Preserve native stderr for the parser instead of allowing Windows
+      # PowerShell to promote advisory output into a terminating ErrorRecord.
+      $ErrorActionPreference = "Continue"
+      [System.IO.File]::ReadAllText($promptPath) | & qwen @deepSeekArgs 1> $structuredResultPath 2> $qwenErrorPath
+      $workerExitCode = $LASTEXITCODE
+    } finally {
+      $ErrorActionPreference = $previousErrorAction
+    }
+    $qwenMetrics = Convert-QwenJsonOutput -JsonPath $structuredResultPath -ErrorPath $qwenErrorPath -ProviderLedgerPath (Join-Path $qwenHome "usage") -TextPath $resultPath
+    if (-not $qwenMetrics) {
+      $workerExitCode = 1
+      $workerError = "Qwen structured output could not be parsed."
+    } elseif ($qwenMetrics.is_error) {
+      $workerError = $qwenMetrics.error_message
     }
   }
 } catch {
@@ -761,7 +693,7 @@ $workerResult = [ordered]@{
   task = $Task
   attempt = $Attempt
   worker = $Worker
-  harness = $(if ($Worker -eq "deepseek") { $DeepSeekHarness } else { "qwen" })
+  harness = "qwen"
   model = $selectedModel
   budget = $Budget
   status = $workerStatus
@@ -789,7 +721,7 @@ $workerResult = [ordered]@{
     run_dir = $runDir
     full_result = $resultPath
     structured_result = $(if (Test-Path -LiteralPath $structuredResultPath) { $structuredResultPath } else { $null })
-    stderr = $(if ($Worker -eq "deepseek" -and $DeepSeekHarness -eq "claude" -and (Test-Path -LiteralPath $claudeErrorPath)) { $claudeErrorPath } elseif (Test-Path -LiteralPath $qwenErrorPath) { $qwenErrorPath } else { $null })
+    stderr = $(if (Test-Path -LiteralPath $qwenErrorPath) { $qwenErrorPath } else { $null })
     summary = $summaryPath
     metadata = $metaPath
     worker_result = $workerResultPath
@@ -824,8 +756,8 @@ $ledgerEvent = [ordered]@{
   requests = $(if ($qwenMetrics) { @($qwenMetrics.requests) } else { @() })
   actual_cost = $null
   estimated_cost_cny = $estimatedCostCny
-  cost_note = $(if ($qwenMetrics -and $qwenMetrics.availability -eq "reported") { "Exact provider token usage; catalog estimate does not apply provider-specific cache discounts, and provider billing is authoritative" } elseif ($qwenMetrics -and $qwenMetrics.availability -eq "recovered") { "Usage recovered from provider records after failure; provider billing remains authoritative" } elseif ($Worker -eq "deepseek" -and $DeepSeekHarness -eq "claude") { "CLI actual usage unavailable; Claude harness request cap was USD $DeepSeekMaxBudgetUsd" } else { "CLI usage unavailable; no token or cost value was fabricated" })
-  harness = $(if ($Worker -eq "deepseek") { $DeepSeekHarness } else { "qwen" })
+  cost_note = $(if ($qwenMetrics -and $qwenMetrics.availability -eq "reported") { "Exact provider token usage; catalog estimate does not apply provider-specific cache discounts, and provider billing is authoritative" } elseif ($qwenMetrics -and $qwenMetrics.availability -eq "recovered") { "Usage recovered from provider records after failure; provider billing remains authoritative" } else { "CLI usage unavailable; no token or cost value was fabricated" })
+  harness = "qwen"
   worker_result = $workerResultPath
 }
 Add-Content -LiteralPath $UsageLedger -Value ($ledgerEvent | ConvertTo-Json -Compress) -Encoding UTF8

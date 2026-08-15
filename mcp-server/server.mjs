@@ -670,7 +670,7 @@ const tools = [
   },
   {
     name: "doctor",
-    description: "Read-only diagnostic of local AI Team configuration and tool availability. Reports Node, PowerShell, Git, Qwen and Claude/DeepSeek harness command availability, per-provider configuration (presence only, never values), and trusted HTTP/HTTPS proxy presence. Never makes paid model calls, never writes to environment/registry/system, and never changes proxies. Public proxy discovery and TLS verification bypass are forbidden.",
+    description: "Read-only diagnostic of local AI Team configuration and tool availability. Reports Node, PowerShell, Git, Qwen harness availability, per-provider configuration (presence only, never values), and trusted HTTP/HTTPS or Windows system proxy presence. Never makes paid model calls, never writes to environment/registry/system, and never changes proxies. Public proxy discovery and TLS verification bypass are forbidden.",
     inputSchema: {
       type: "object",
       properties: {},

@@ -84,36 +84,12 @@ try {
   foreach ($requiredGuidance in @("hard work budget", "one-third of the turns", "Reserve the final 2 turns", "do not create plans or todos")) {
     if (-not $sourceText.Contains($requiredGuidance)) { throw "Missing turn-budget guidance: $requiredGuidance" }
   }
-  foreach ($requiredReliabilityText in @("Do not start another large generated file", "complete and validate one allowed file", '"--input-format", "text"', "ReadAllText(`$promptPath) | & claude", 'CLAUDE_CODE_MAX_CONTEXT_TOKENS = "1000000"', '2> $claudeErrorPath')) {
+  foreach ($requiredReliabilityText in @("Do not start another large generated file", "complete and validate one allowed file", 'DEEPSEEK_API_KEY', 'ReadAllText($promptPath) | & qwen @deepSeekArgs', 'contextWindowSize = 1000000', '2> $qwenErrorPath')) {
     if (-not $sourceText.Contains($requiredReliabilityText)) { throw "Missing worker reliability behavior: $requiredReliabilityText" }
   }
-  if ($sourceText -match '(?s)\$claudeArgs\s*=\s*@\(.*?\$workerPrompt.*?\)') {
-    throw "Claude args must not carry the full worker prompt as a positional argument."
+  if ($sourceText -match '(?i)claude|DeepSeekHarness|DeepSeekMaxBudgetUsd') {
+    throw "Claude compatibility code must not remain in the unified Qwen harness worker."
   }
-
-  # A Claude-compatible CLI may emit an advisory on stderr while succeeding.
-  # Reproduce that Windows PowerShell behavior without a provider call.
-  $fakeClaude = Join-Path $fixture "fake-claude.ps1"
-  $fakeStdout = Join-Path $fixture "fake-claude-stdout.txt"
-  $fakeStderr = Join-Path $fixture "fake-claude-stderr.txt"
-  @'
-param()
-[Console]::Error.WriteLine("unknown-model context advisory")
-Write-Output "completed"
-exit 0
-'@ | Set-Content -LiteralPath $fakeClaude -Encoding UTF8
-  $previousErrorAction = $ErrorActionPreference
-  try {
-    $ErrorActionPreference = "Continue"
-    "fixture prompt" | & $fakeClaude 1> $fakeStdout 2> $fakeStderr
-    $fakeExit = $LASTEXITCODE
-  } finally {
-    $ErrorActionPreference = $previousErrorAction
-  }
-  if ($fakeExit -ne 0 -or (Get-Content -LiteralPath $fakeStdout -Raw) -notmatch "completed" -or (Get-Content -LiteralPath $fakeStderr -Raw) -notmatch "advisory") {
-    throw "Claude stderr advisory must be logged without converting an exit-0 run into failure."
-  }
-  Write-Host "Claude stderr advisory fixture: passed"
 
   function Test-ArgArrayHasFlag {
     param([string[]]$Lines, [string]$VarName, [string]$Flag)
@@ -139,16 +115,9 @@ exit 0
   }
   Write-Host "safe-mode assertion 2: `$deepSeekArgs has --safe-mode"
 
-  # 3) $claudeArgs must NOT contain --safe-mode
-  if (Test-ArgArrayHasFlag -Lines $sourceLines -VarName '$claudeArgs' -Flag '--safe-mode') {
-    throw "`$claudeArgs must NOT contain --safe-mode."
-  }
-  Write-Host "safe-mode assertion 3: `$claudeArgs lacks --safe-mode"
+  Write-Host "Worker safe-mode: 2 source-level assertions passed"
 
-  Write-Host "Worker safe-mode: 3 source-level assertions passed"
-
-  # Source-level stream-json assertions: both Qwen arg arrays use stream-json,
-  # Claude arg array does not.
+  # Source-level stream-json assertions: both Qwen arg arrays use stream-json.
   $streamJsonCount = @($sourceLines | Select-String -SimpleMatch '"stream-json"').Count
   if ($streamJsonCount -ne 2) {
     throw "Expected exactly two Qwen --output-format stream-json arguments, found $streamJsonCount."
@@ -162,11 +131,6 @@ exit 0
     throw "`$deepSeekArgs must use --output-format stream-json."
   }
   Write-Host "stream-json assertion 2: `$deepSeekArgs uses stream-json"
-  if (Test-ArgArrayHasFlag -Lines $sourceLines -VarName '$claudeArgs' -Flag 'stream-json') {
-    throw "`$claudeArgs must NOT use stream-json."
-  }
-  Write-Host "stream-json assertion 3: `$claudeArgs lacks stream-json"
-
   Write-Host "All tests passed."
 } finally {
   if (Test-Path -LiteralPath $fixture) { Remove-Item -LiteralPath $fixture -Recurse -Force }

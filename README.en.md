@@ -29,7 +29,7 @@ The project is designed for Windows-based maintainer workflows. It combines mode
 - Codex Desktop or another MCP-compatible Codex environment
 - At least one supported provider API key
 
-Optional worker harnesses include Qwen Code CLI and Claude Code CLI.
+The optional local worker harness is Qwen Code CLI. It runs both Qwen and DeepSeek through isolated OpenAI-compatible provider settings; Claude Code is not required.
 
 ## Install
 
@@ -70,6 +70,8 @@ SILICONFLOW_MCP_BASE_URL = 'https://api.siliconflow.cn/v1'
 Provider keys are read from environment variables. Do not put keys in the repository, prompts, or Codex configuration examples.
 
 Network failures are classified as DNS, connect timeout/refusal, unreachable network, reset connection, TLS, request timeout, or unknown fetch failure. Safely replayable failures receive at most one bounded retry. Paid POST requests are not replayed after a reset or timeout when delivery is uncertain. Configure only a trusted HTTP/HTTPS proxy through `AI_TEAM_TRUSTED_PROXY_URL` or standard `HTTPS_PROXY` / `HTTP_PROXY` variables. `AI_TEAM_PROXY_MODE` accepts `fallback` (default), `always`, or `off`; public proxy discovery is intentionally unsupported. Proxy URLs and credentials are never included in diagnostics.
+
+On Windows, `scripts/codex-proxy-health.ps1 -JsonOnly` can check the currently configured trusted local system proxy against xAI, Grok, and GitHub. It does not read subscriptions, discover public proxies, switch nodes, expose proxy URLs, or disable TLS verification.
 
 `budget_route` reads the key for each selected provider, including `OPENROUTER_API_KEY`, `GROQ_API_KEY`, `GEMINI_API_KEY`, and `SILICONFLOW_API_KEY`. It defaults to `dry_run=true`; a preview may call a provider's model-list endpoint, but it never sends a generation request. Set `AI_TEAM_OPENROUTER_FREE_FALLBACK=true` only if you intentionally want `openrouter/free` considered in `free_only` mode. Verified per-model capability, privacy, latency, price, or quality metadata can be supplied as JSON through `AI_TEAM_MODEL_METADATA_JSON`; see the example config.
 

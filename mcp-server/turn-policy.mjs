@@ -3,8 +3,8 @@ const RETRY_TURNS = 4;
 const COMPLEX_TURNS = 12;
 const MEDIUM_TURNS = 10;
 const SMALL_TURNS = 6;
-const SCOUT_RETRY_TURNS = 3;
-const SCOUT_TURNS = { small: 3, medium: 4, complex: 6 };
+const SCOUT_RETRY_TURNS = 4;
+const SCOUT_TURNS = { small: 4, medium: 5, complex: 7 };
 
 export function selectScoutTurnPolicy({ complexity = "medium", attempt = 1 } = {}) {
   const normalized = Object.hasOwn(SCOUT_TURNS, complexity) ? complexity : "medium";
@@ -15,10 +15,10 @@ export function selectScoutTurnPolicy({ complexity = "medium", attempt = 1 } = {
     policy: isRetry ? "focused_scout_failover" : `${normalized}_scout_turns`,
     complexity: normalized,
     attempt,
-    hard_cap: 6,
+    hard_cap: 7,
     reason: isRetry
-      ? "Focused read-only failover with one discovery turn, one evidence turn, and one final answer turn"
-      : `Read-only ${normalized} inspection reserves a final answer turn after bounded discovery`,
+      ? "Focused read-only failover reserves a tool-free final answer turn after bounded evidence checks"
+      : `Read-only ${normalized} inspection reserves a tool-free final answer turn after bounded discovery`,
   };
 }
 

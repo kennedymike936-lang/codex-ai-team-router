@@ -86,7 +86,7 @@ test("classifies retryable helper failures without bypassing configuration error
     { kind: "harness_stdin", retryable: true },
   );
   assert.deepEqual(selectWorkerFailoverRoute({ worker: "qwen", harness: "qwen" }), {
-    worker: "deepseek", harness: "claude",
+    worker: "deepseek", harness: "qwen",
   });
   const task = buildWorkerFailoverTask(
     {
@@ -96,11 +96,11 @@ test("classifies retryable helper failures without bypassing configuration error
     },
     { kind: "turn_limit" },
     { worker: "qwen", harness: "qwen" },
-    { worker: "deepseek", harness: "claude" },
+    { worker: "deepseek", harness: "qwen" },
   );
   assert.match(task, /attempt 2 of 2/i);
   assert.match(task, /do not repeat broad discovery/i);
-  assert.match(task, /deepseek\/claude/i);
+  assert.match(task, /deepseek\/qwen/i);
   assert.match(task, /locales\/one\.reds/);
   assert.match(task, /compar(?:e|ing).*current workspace diff/i);
 });
@@ -300,7 +300,7 @@ $score = $(if ($Attempt -eq 1) { 85 } else { 95 })
   }
 });
 
-test("project_task switches once from a turn-limited Qwen scout to an independent DeepSeek harness", async () => {
+test("project_task switches once from a turn-limited Qwen scout to DeepSeek on the isolated Qwen harness", async () => {
   const root = await mkdtemp(join(tmpdir(), "ai-team-failover-"));
   const cwd = join(root, "workspace");
   const scripts = join(root, "scripts");
@@ -308,7 +308,7 @@ test("project_task switches once from a turn-limited Qwen scout to an independen
   await mkdir(cwd);
   await mkdir(scripts);
   const scoutScript = String.raw`param(
-  [string]$Task, [string]$TaskId, [string]$Cwd, [string]$Worker, [string]$DeepSeekHarness,
+  [string]$Task, [string]$TaskId, [string]$Cwd, [string]$Worker,
   [string]$Budget, [string]$MaxWallTime, [int]$MaxSessionTurns,
   [int]$SummaryMaxChars, [switch]$JsonOnly
 )
@@ -316,7 +316,7 @@ $failed = $Worker -eq "qwen"
 [ordered]@{
   status = $(if ($failed) { "failed" } else { "success" })
   worker = $Worker
-  harness = $(if ($Worker -eq "deepseek") { $DeepSeekHarness } else { "qwen" })
+  harness = "qwen"
   model = "fake-$Worker"
   error = $(if ($failed) { "FatalTurnLimitedError: Reached max session turns" } else { "" })
   summary = $(if ($failed) { "Reached max session turns" } else { "fallback inspection complete" })
@@ -324,7 +324,7 @@ $failed = $Worker -eq "qwen"
   changed_files = @()
   scout_pack = [ordered]@{ enabled = $false; reason = "fixture"; char_count = 0; max_chars = 1000; truncated = $false; file_count = 0; match_count = 0; elapsed_ms = 0; wrapper_elapsed_ms = 1 }
   task_id = $TaskId
-  artifacts = [ordered]@{ run_dir = "fake-$TaskId-$Worker-$DeepSeekHarness"; worker_result = ""; full_result = "" }
+  artifacts = [ordered]@{ run_dir = "fake-$TaskId-$Worker-qwen"; worker_result = ""; full_result = "" }
   received_task_id = $TaskId
 } | ConvertTo-Json -Depth 5 -Compress
 `;
@@ -345,14 +345,14 @@ $failed = $Worker -eq "qwen"
     assert.equal(result.attempts.length, 2);
     assert.deepEqual(result.route_history, [
       { attempt: 1, worker: "qwen", harness: "qwen", failure_kind: "turn_limit" },
-      { attempt: 2, worker: "deepseek", harness: "claude", failure_kind: "none" },
+      { attempt: 2, worker: "deepseek", harness: "qwen", failure_kind: "none" },
     ]);
-    assert.deepEqual(result.attempts[0].failover_to, { worker: "deepseek", harness: "claude" });
+    assert.deepEqual(result.attempts[0].failover_to, { worker: "deepseek", harness: "qwen" });
     assert.match(result.summary, /fallback inspection complete/);
     assert.equal(result.artifacts.team_runs.length, 2);
     assert.ok(result.artifacts.team_runs.every((run) => run.includes(result.task_id)));
-    assert.equal(result.turn_policy.first_attempt.max_session_turns, 3);
-    assert.equal(result.turn_policy.targeted_retry.max_session_turns, 3);
+    assert.equal(result.turn_policy.first_attempt.max_session_turns, 4);
+    assert.equal(result.turn_policy.targeted_retry.max_session_turns, 4);
   } finally {
     if (previousScriptRoot === undefined) delete process.env.AI_TEAM_SCRIPT_ROOT;
     else process.env.AI_TEAM_SCRIPT_ROOT = previousScriptRoot;
@@ -370,14 +370,14 @@ test("project_task recovers a structured partial handoff from a nonzero PowerShe
   const workerScript = String.raw`param(
   [string]$Worker, [string]$Task, [string]$Cwd, [string]$TaskId, [int]$Attempt,
   [string]$Approval, [string]$Budget, [string]$MaxWallTime, [int]$MaxSessionTurns,
-  [int]$SummaryMaxChars, [string]$AllowedPathJson, [string]$DeepSeekHarness, [switch]$JsonOnly
+  [int]$SummaryMaxChars, [string]$AllowedPathJson, [switch]$JsonOnly
 )
 $partial = Join-Path $Cwd "partial.txt"
 if ($Attempt -eq 1) { "useful" | Set-Content -LiteralPath $partial -Encoding UTF8 }
 [ordered]@{
   status = $(if ($Attempt -eq 1) { "failed" } else { "success" })
   worker = $Worker
-  harness = $(if ($Worker -eq "deepseek") { $DeepSeekHarness } else { "qwen" })
+  harness = "qwen"
   model = "fake-$Worker"
   error = $(if ($Attempt -eq 1) { "wall-clock timeout with partial output" } else { "" })
   summary = $(if ($Attempt -eq 1) { "timed out after preserving partial.txt" } else { "fallback preserved and completed partial.txt" })
@@ -405,7 +405,7 @@ if ($Attempt -eq 1) { exit 55 }
     assert.equal(result.status, "success");
     assert.equal(result.attempts.length, 2);
     assert.equal(result.attempts[0].failure_kind, "timeout");
-    assert.deepEqual(result.attempts[0].failover_to, { worker: "deepseek", harness: "claude" });
+    assert.deepEqual(result.attempts[0].failover_to, { worker: "deepseek", harness: "qwen" });
     assert.deepEqual(result.changed_files, ["partial.txt"]);
     assert.equal(result.usage.total_tokens, 24);
     assert.equal(result.artifacts.team_runs.length, 2);

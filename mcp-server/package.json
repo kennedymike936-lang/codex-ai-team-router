@@ -26,6 +26,6 @@
     "smoke": "node smoke-test.mjs",
     "probe:live": "node live-model-probe.mjs",
     "probe:xai": "node xai-mcp-live-probe.mjs",
-    "test": "node quality-policy-test.mjs && node model-selector-test.mjs && node network-client-test.mjs && node doctor-test.mjs && node xai-search-test.mjs && node budget-router-test.mjs && node --test project-task-test.mjs mechanical-inspector-test.mjs turn-policy-test.mjs && node smoke-test.mjs && powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/codex-worker-test.ps1 && powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/codex-scout-pack-test.ps1 && powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/ai-team-evolve-test.ps1 && powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/codex-gate-test.ps1"
+    "test": "node quality-policy-test.mjs && node model-selector-test.mjs && node network-client-test.mjs && node doctor-test.mjs && node xai-search-test.mjs && node budget-router-test.mjs && node --test project-task-test.mjs mechanical-inspector-test.mjs turn-policy-test.mjs && node smoke-test.mjs && powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/codex-worker-test.ps1 && powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/codex-scout-pack-test.ps1 && powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/codex-proxy-health-test.ps1 && powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/ai-team-evolve-test.ps1 && powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/codex-gate-test.ps1"
   }
 }

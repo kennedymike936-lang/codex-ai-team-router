@@ -22,7 +22,6 @@ export const DIAGNOSTIC_ONLY =
 
 const HARNESS_COMMANDS = [
   { command: "qwen", label: "Qwen harness" },
-  { command: "claude", label: "Claude/DeepSeek harness" },
 ];
 
 function defaultExec(file, args) {
@@ -73,11 +72,26 @@ function defaultEnvPresence(name, env, exec, platform) {
   return check.ok && check.output.trim().toLowerCase() === "true";
 }
 
+function defaultSystemProxyPresence(exec, platform) {
+  if (platform !== "win32") return false;
+  const check = tryRun(
+    exec,
+    "powershell.exe",
+    [
+      "-NoProfile",
+      "-Command",
+      "$p=Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -ErrorAction SilentlyContinue; [bool]($p.ProxyEnable -and -not [string]::IsNullOrWhiteSpace([string]$p.ProxyServer))",
+    ],
+  );
+  return check.ok && check.output.trim().toLowerCase() === "true";
+}
+
 export function runDoctor(options = {}) {
   const env = options.env || process.env;
   const exec = options.exec || defaultExec;
   const platform = options.platform || process.platform;
   const envPresence = options.envPresence || ((name) => defaultEnvPresence(name, env, exec, platform));
+  const systemProxyPresence = options.systemProxyPresence ?? defaultSystemProxyPresence(exec, platform);
 
   const findings = [];
   const add = (severity, message, suggestion = null) => {
@@ -139,10 +153,17 @@ export function runDoctor(options = {}) {
     http_proxy_configured: ["HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"].some(envPresence),
     https_proxy_configured: ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"].some(envPresence),
     no_proxy_configured: ["NO_PROXY", "no_proxy"].some(envPresence),
+    system_proxy_configured: Boolean(systemProxyPresence),
     policy: PROXY_POLICY,
   };
   if (proxy.trusted_proxy_configured || proxy.http_proxy_configured || proxy.https_proxy_configured) {
     add("pass", "A trusted HTTP/HTTPS proxy is configured. Proxy URLs and credentials are never returned.");
+  } else if (proxy.system_proxy_configured) {
+    add(
+      "warn",
+      "A Windows system proxy is configured but is not inherited by this MCP process.",
+      "Set AI_TEAM_TRUSTED_PROXY_URL or HTTPS_PROXY to the same trusted local HTTP proxy endpoint, then restart Codex. The URL is never returned.",
+    );
   } else {
     add("warn", "No trusted HTTP/HTTPS proxy is configured.", "Configure AI_TEAM_TRUSTED_PROXY_URL, HTTP_PROXY, or HTTPS_PROXY only if direct provider access requires a trusted proxy.");
   }

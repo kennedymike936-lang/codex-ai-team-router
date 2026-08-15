@@ -46,7 +46,7 @@ flowchart LR
 - `delegate_task`：处理不需要本地文件工具的问答、草稿和分析；按任务复杂度自动选择一个或两个代码 Worker，复杂且依赖实时资料时再加入 Grok。
 - `grok_search`：一次只读 Web Search 或 X Search，`source=auto` 时一般实时资讯走 Web、帖子和舆论走 X；默认限制一个服务端工具回合。
 - `budget_route`：在用户主动配置的 OpenRouter、Groq、Gemini、OpenAI Responses 或管理员配置的 OpenAI-compatible 服务范围内，按能力、已知价格、隐私、延迟、健康状态和剩余限额解释并选择模型；默认只预览。
-- `doctor`：只读检查 Node、PowerShell、Git、Qwen/Claude 外壳、各 Provider 凭证是否存在以及可信代理是否配置；只返回布尔状态和安全建议，不读取或返回密钥、代理 URL 与凭证，也不发起模型调用。
+- `doctor`：只读检查 Node、PowerShell、Git、Qwen 外壳、各 Provider 凭证是否存在，以及 MCP/Windows 系统代理是否配置；只返回布尔状态和安全建议，不读取或返回密钥、代理 URL 与凭证，也不发起模型调用。
 - `project_task`：把一整段本地侦查或实现交给自动扩编的 Qwen/DeepSeek 团队；实现后可自动运行确定性 Gate，只把交接包返回 Codex。
 - `worker_gate_review`：对结构化结果做确定性质量决策，也兼容原有的 diff 轻量审查。
 
@@ -257,6 +257,14 @@ AI_TEAM_PROXY_MODE         # fallback（默认）、always 或 off
 
 `fallback` 先直连，只有 DNS、连接建立超时/拒绝或网络不可达等可安全判断的失败才尝试一次代理。`always` 从第一步就使用已配置代理；`off` 禁止代理。诊断结果只报告是否配置/尝试了代理，不输出代理 URL 或其中的凭证。TLS 错误不会通过关闭证书校验解决。Grok 网络失败会返回结构化 `network_unavailable` 结果，不再退化成无上下文的 MCP `fetch failed`。
 
+Windows 用户可以只读检查自己已经配置的本地可信代理：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-proxy-health.ps1 -JsonOnly
+```
+
+脚本只读取当前 Windows 系统代理或显式传入的 HTTP/HTTPS 代理，默认拒绝非本机地址；它检查 xAI、Grok 和 GitHub 的 HTTPS 连通性，不读取订阅、不枚举或切换节点、不搜索公共代理，也不关闭 TLS 验证。机场节点异常时先在自己的客户端切换节点，再重新运行检查。
+
 ## 接入 Codex
 
 打开 `~/.codex/config.toml`，参考 [examples/config.toml.example](examples/config.toml.example) 添加 MCP server。
@@ -457,8 +465,7 @@ DeepSeek worker：
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-worker.ps1 `
   -Worker deepseek `
   -Task "定位失败测试并提交最小修复" `
-  -Cwd "C:\path\to\project" `
-  -DeepSeekMaxBudgetUsd 0.10
+  -Cwd "C:\path\to\project"
 ```
 
 直接调用脚本时，`auto` 可能在无交互后台拒绝编辑；需要实际实现时使用 `yolo`，并同时设置 `AllowedPath`、保持 Git 可恢复、随后运行 Gate。`project_task` 已把这套流程串联起来。
@@ -514,7 +521,7 @@ MCP 请求会记录服务商返回的准确 Token 用量、模型、耗时、是
 
 xAI 请求还会记录官方 `cost_in_usd_ticks` 换算出的实际美元扣费、服务端搜索次数和引用 URL；该金额已经包含 Token、缓存折扣和搜索工具调用。
 
-Qwen Code Agent 外壳使用结构化 JSON 输出，Worker 账本会记录服务商返回的输入、输出、缓存 Token、回合数和公开单价估算。旧版 Claude Code 兼容外壳仍不提供统一 Token 字段，因此该模式只记录可验证信息，不编造用量：
+Qwen Code Agent 外壳使用结构化 JSON 输出。Qwen 与 DeepSeek Worker 共享这一隔离外壳，账本会记录服务商返回的输入、输出、缓存 Token、回合数和公开单价估算：
 
 ```text
 %USERPROFILE%\.codex-ai-team\usage\worker-runs.jsonl
@@ -522,7 +529,7 @@ Qwen Code Agent 外壳使用结构化 JSON 输出，Worker 账本会记录服务
 
 账本中的 `estimated_cost_cny` 只是按仓库价格目录计算的估值；缓存折扣、限时活动、地域和账户阶梯价以服务商账单为准。Worker 的完整结构化响应保存在每次运行目录的 `qwen-result.json`，Codex 默认只读取短摘要。
 
-DeepSeek Worker 默认使用 Qwen Code 的 OpenAI-compatible Agent 外壳，并在每次运行目录中生成不含密钥的临时 Provider 配置，声明 DeepSeek V4 的上下文能力；这避免 Claude Code 对第三方模型费用的错误估算。需要兼容旧流程时可显式传入 `-DeepSeekHarness claude`。
+DeepSeek Worker 固定使用 Qwen Code 的 OpenAI-compatible Agent 外壳，并在每次运行目录中生成不含密钥的临时 Provider 配置，声明 DeepSeek V4 的上下文能力。后台 Worker 不依赖 Claude Code。
 
 可以手动执行极小的在线探针验证两个账号和自动选择。该命令会产生少量模型费用，不会被 `npm test` 自动执行：
 
@@ -588,7 +595,7 @@ npm run probe:xai
 
 ## 可选路径变量
 
-如果 Node、Git、Qwen Code 或 Claude Code 不在系统 PATH，可设置：
+如果 Node、Git 或 Qwen Code 不在系统 PATH，可设置：
 
 ```text
 AI_TEAM_NODE_DIR
@@ -614,8 +621,8 @@ AI_TEAM_TOOLS_DIR
 
 ### DeepSeek 请求失败
 
-- 检查 `ANTHROPIC_API_KEY` 或 `ANTHROPIC_AUTH_TOKEN`。
-- 确认接口支持 Anthropic Messages 兼容格式。
+- 优先检查 `DEEPSEEK_API_KEY`；旧配置也兼容 `ANTHROPIC_API_KEY` 或 `ANTHROPIC_AUTH_TOKEN`。
+- 确认 DeepSeek OpenAI-compatible 接口可用。
 - 运行 `npm run probe:live` 检查账号可见模型和自动选择结果。
 - 只有使用 `AI_TEAM_MODEL_MODE=fixed` 时才需要人工检查 `DEEPSEEK_MCP_MODEL`。
 

@@ -159,7 +159,6 @@ async function runScout({ task, taskId, cwd, worker, harness = "qwen", budget, m
     "-SummaryMaxChars", String(summaryMaxChars),
     "-JsonOnly",
   ];
-  if (worker === "deepseek") scriptArgs.push("-DeepSeekHarness", harness);
   const execution = await runPowerShell(scoutScript, scriptArgs, timeoutMs);
   const result = parseJsonOutput(execution.stdout, `${worker} scout worker`);
   return { ...result, worker: result.worker || worker, harness: result.harness || harness };
@@ -340,10 +339,7 @@ export function classifyWorkerFailure(workerResult = {}) {
 
 export function selectWorkerFailoverRoute(route = {}) {
   const worker = route.worker === "qwen" ? "qwen" : "deepseek";
-  const harness = route.harness === "claude" ? "claude" : "qwen";
-  if (worker === "qwen" || harness === "qwen") {
-    return { worker: "deepseek", harness: "claude" };
-  }
+  if (worker === "qwen") return { worker: "deepseek", harness: "qwen" };
   return { worker: "qwen", harness: "qwen" };
 }
 
@@ -601,7 +597,6 @@ export async function runProjectTask(args = {}) {
         "-AllowedPathJson", allowedJson,
         "-JsonOnly",
       ];
-      if (currentRoute.worker === "deepseek") workerArgs.push("-DeepSeekHarness", currentRoute.harness);
       try {
         const workerExecution = await runPowerShell(workerScript, workerArgs, attemptTimeoutSeconds * 1000);
         workerResult = parseJsonOutput(workerExecution.stdout, "Project worker");

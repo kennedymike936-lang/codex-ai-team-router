@@ -23,7 +23,7 @@ const env = {
   NO_PROXY: "localhost,127.0.0.1",
 };
 
-const result = runDoctor({ env, exec: fakeExec, platform: "win32" });
+const result = runDoctor({ env, exec: fakeExec, platform: "win32", systemProxyPresence: false });
 const json = JSON.stringify(result);
 
 // Structured runtime + harness availability.
@@ -37,7 +37,6 @@ assert.deepEqual(
 );
 assert.deepEqual(result.harness.map((h) => [h.command, h.available]), [
   ["qwen", true],
-  ["claude", false],
 ]);
 
 // Providers: presence only, never values.
@@ -52,6 +51,7 @@ assert.equal(result.proxy.http_proxy_configured, true);
 assert.equal(result.proxy.https_proxy_configured, true);
 assert.equal(result.proxy.no_proxy_configured, true);
 assert.equal(result.proxy.trusted_proxy_configured, false);
+assert.equal(result.proxy.system_proxy_configured, false);
 assert.ok(!json.includes("proxy.invalid"), "must not leak proxy URLs");
 assert.ok(!json.includes("fixture-pass"), "must not leak proxy credentials");
 
@@ -77,10 +77,9 @@ assert.ok(warn.every((f) => typeof f.suggestion === "string" && f.suggestion.len
 
 // commandExists helper is deterministic.
 assert.equal(commandExists("qwen", fakeExec, "win32"), true);
-assert.equal(commandExists("claude", fakeExec, "win32"), false);
 
 // Unconfigured provider (no env) reports unconfigured for every provider.
-const empty = runDoctor({ env: {}, exec: fakeExec, envPresence: () => false, platform: "win32" });
+const empty = runDoctor({ env: {}, exec: fakeExec, envPresence: () => false, systemProxyPresence: false, platform: "win32" });
 assert.ok(empty.providers.every((p) => p.status === "unconfigured"));
 assert.ok(empty.findings.some((f) => f.severity === "warn" && /No trusted HTTP\/HTTPS proxy/.test(f.message)));
 
@@ -93,5 +92,16 @@ const userScopeExec = (file, args) => {
 };
 const userScope = runDoctor({ env: {}, exec: userScopeExec, platform: "win32" });
 assert.equal(userScope.providers.find((p) => p.provider === "groq").status, "configured");
+
+const systemProxy = runDoctor({
+  env: {},
+  exec: fakeExec,
+  envPresence: () => false,
+  systemProxyPresence: true,
+  platform: "win32",
+});
+assert.equal(systemProxy.proxy.system_proxy_configured, true);
+assert.ok(systemProxy.findings.some((f) => /system proxy is configured but is not inherited/i.test(f.message)));
+assert.ok(!JSON.stringify(systemProxy).includes("127.0.0.1"));
 
 console.log("doctor-test.mjs: all assertions passed");
