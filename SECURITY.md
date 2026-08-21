@@ -32,6 +32,8 @@ Files, issues, logs, and task text may contain prompt-injection instructions int
 
 `project_task` accepts a user-supplied `cwd` and optional `allowed_paths`. A validation mistake, path traversal, symlink, junction, case-normalization error, or model mistake could affect files outside the intended scope. Run workers in a dedicated, recoverable Git checkout and review the final diff.
 
+`routine_workpack` applies a deterministic preflight policy before calling a worker. High-risk, destructive, external-write, and unbounded implementation items are escalated instead of executed. This classification is a conservative routing control, not a sandbox; eligible items still inherit the same working-directory and filesystem risks as `project_task`.
+
 ### Shell and project scripts
 
 Implementation workers can execute model-generated commands. The Gate may also run build, test, lint, type-check, HTML, or browser scripts from the target project. A malicious repository can therefore execute code under the current user's permissions. Do not use the router on untrusted projects outside an appropriate operating-system sandbox.

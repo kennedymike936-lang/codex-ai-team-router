@@ -10,13 +10,14 @@ The project is designed for Windows-based maintainer workflows. It combines mode
 
 ## What it provides
 
-- One MCP server with five tools: `delegate_task`, `grok_search`, `budget_route`, `project_task`, and `worker_gate_review`.
+- One MCP server with seven tools: `delegate_task`, `grok_search`, `budget_route`, `doctor`, `project_task`, `routine_workpack`, and `worker_gate_review`.
 - Automatic routing between Qwen and DeepSeek based on task type and complexity.
 - Optional read-only Web/X research through Grok Search.
 - Staged multi-agent work: read-only planning, one writing worker, then deterministic validation.
 - Bounded working directories and optional allowed-path enforcement.
 - Build, test, type-check, lint, diff-size, scope, and secret-pattern checks where supported by the target project.
 - Compact MCP responses with full worker artifacts stored locally.
+- Exception-driven routine workpacks: up to 12 bounded chores are split into a read-only lane and one writer lane with a mandatory Gate, while risky or unbounded items are returned to Codex as a compact exception packet.
 - Local token and cost ledgers based on provider-reported usage when available.
 - Explainable, budget-aware OpenRouter and Groq selection with conservative capability and privacy filtering.
 - An isolated eight-task benchmark with hidden acceptance checks.
@@ -94,6 +95,24 @@ Delegate a bounded implementation and run the Gate:
 
 Use `mode: "inspect"` for read-only investigation. `max_assistants` is a cost cap, not a requested team size.
 
+Batch routine chores while keeping production work out of the worker path:
+
+```json
+{
+  "cwd": "C:\\path\\to\\project",
+  "items": [
+    { "id": "docs", "task": "Update the README examples", "allowed_paths": ["README.md"] },
+    { "id": "tests", "task": "Add parser boundary tests", "allowed_paths": ["test/parser.test.js"] },
+    { "id": "deploy", "task": "Deploy to production", "allowed_paths": ["deploy"] }
+  ],
+  "budget": "low"
+}
+```
+
+The first two items are eligible for the bounded writer lane. Production deployment is classified as high risk and appears only in `escalations`. An explicit low-risk label cannot downgrade detected high-risk work.
+
+`openai:gpt-5.6-luna` is registered as a future high-volume routine-worker slot with dated built-in catalog metadata. It remains `reserved` until explicitly enabled, configured with `OPENAI_API_KEY`, and backed by a separate bounded local tool runner. The placeholder never receives local write access and does not make an API request.
+
 Preview budget-aware routing:
 
 ```json
@@ -152,6 +171,8 @@ For sensitive `budget_route` work, set `sensitive=true` or `require_zero_data_re
 - PowerShell workers are Windows-oriented.
 - Routing is heuristic and can select the wrong worker.
 - The Gate cannot prove that generated code is safe.
+- `routine_workpack` runs at most one read-only batch and one single-writer/Gate batch; it is not yet a persistent background queue.
+- GPT-5.6 Luna is a disabled worker slot until its local bounded runner and representative evals are complete.
 - Logs are not automatically guaranteed to be redacted.
 - Running target-project tests can execute untrusted project code.
 - Usage estimates may differ from provider billing.

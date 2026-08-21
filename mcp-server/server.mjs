@@ -14,6 +14,8 @@ import { xaiSearchClient } from "./xai-search.mjs";
 import { createBudgetRouter } from "./budget-router.mjs";
 import { isNetworkRequestError, resilientFetch } from "./network-client.mjs";
 import { runDoctor } from "./doctor.mjs";
+import { mergeBuiltinModelMetadata } from "./autonomy-policy.mjs";
+import { runRoutineWorkpack } from "./routine-workpack.mjs";
 
 const DEFAULT_CHECKLIST = [
   "code can run/build",
@@ -143,10 +145,12 @@ function openAiResponsesConfig() {
 
 function budgetRouterMetadata() {
   const value = process.env.AI_TEAM_MODEL_METADATA_JSON;
-  if (!value) return {};
+  if (!value) return mergeBuiltinModelMetadata();
   try {
     const parsed = JSON.parse(value);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    return mergeBuiltinModelMetadata(
+      parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {},
+    );
   } catch {
     throw new Error("AI_TEAM_MODEL_METADATA_JSON must be a valid JSON object.");
   }
@@ -629,6 +633,48 @@ const tools = [
     },
   },
   {
+    name: "routine_workpack",
+    description: "Execute up to 12 bounded routine chores in least-privilege read-only and single-writer lanes. Implementation always passes the deterministic Gate. High-risk, destructive, external-write, and unbounded implementation items return as a compact Codex exception packet. GPT-5.6 Luna is a reserved future worker slot until explicitly enabled, configured, and backed by a local bounded runner.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        cwd: { type: "string", minLength: 1 },
+        task_id: { type: "string" },
+        items: {
+          type: "array",
+          minItems: 1,
+          maxItems: 12,
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "string" },
+              task: { type: "string", minLength: 1 },
+              mode: { type: "string", enum: ["auto", "inspect", "implement"] },
+              risk: { type: "string", enum: ["auto", "low", "medium", "high"] },
+              allowed_paths: {
+                type: "array",
+                maxItems: 20,
+                items: { type: "string", minLength: 1 },
+              },
+              destructive: { type: "boolean" },
+              external_write: { type: "boolean" },
+            },
+            required: ["task"],
+            additionalProperties: false,
+          },
+        },
+        preferred: { type: "string", enum: ["auto", "qwen", "deepseek"] },
+        max_assistants: { type: "integer", minimum: 1, maximum: 3 },
+        budget: { type: "string", enum: ["low", "normal", "deep"] },
+        max_minutes: { type: "integer", minimum: 1, maximum: 15 },
+        worker_failover: { type: "boolean" },
+        dry_run: { type: "boolean" },
+      },
+      required: ["cwd", "items"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "worker_gate_review",
     description: "Evaluate a worker result. Structured evaluations use the deterministic quality/takeover policy; diff-only calls use a lightweight model review.",
     inputSchema: {
@@ -746,6 +792,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   if (name === "doctor") {
     return result(JSON.stringify(runDoctor(), null, 2));
+  }
+
+  if (name === "routine_workpack") {
+    const workpack = await runRoutineWorkpack(args, {
+      luna: {
+        enabled: process.env.AI_TEAM_LUNA_ENABLED === "true",
+        configured: Boolean(readUserEnv("OPENAI_API_KEY")),
+        // The Responses adapter can already perform model-only budget routes.
+        // Local write access stays disabled until a bounded tool runner exists.
+        runnerAvailable: false,
+      },
+    });
+    return result(JSON.stringify(workpack, null, 2));
   }
 
   if (name === "grok_search") {

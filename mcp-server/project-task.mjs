@@ -14,6 +14,7 @@ const serverDir = dirname(fileURLToPath(import.meta.url));
 const INSPECTION_WORDS = /\b(inspect|audit|investigate|find|locate|map|read logs?|analy[sz]e|triage|review existing)\b|检查|分析|查找|定位|日志|盘点|侦查|审计|项目地图/i;
 const DOCUMENT_WORDS = /\b(docs?|readme|summary|summarize|organize|translate)\b|文档|总结|整理|翻译|润色/i;
 const CODE_WORDS = /\b(code|bug|fix|implement|refactor|test|build|lint|typecheck|typescript|javascript|python|powershell|css|react|api)\b|代码|脚本|修复|实现|测试|构建|重构|页面|接口/i;
+const MUTATION_WORDS = /\b(fix|implement|change|modify|update|add|remove|delete|create|refactor|rewrite|patch|write|generate|build)\b|修复|实现|修改|更新|添加|新增|移除|删除|创建|重构|重写|编写|生成|构建/i;
 
 function compact(value, maxChars = 2600) {
   const text = String(value || "").trim();
@@ -258,6 +259,7 @@ export function usageAvailability(usage, reason = "") {
 }
 
 const MCP_TIMEOUT_SECONDS = Number(process.env.AI_TEAM_MCP_TIMEOUT_SECONDS) || 300;
+const GATE_TIMEOUT_SECONDS = Math.max(15, Math.min(90, Number(process.env.AI_TEAM_GATE_TIMEOUT_SECONDS) || 45));
 
 export function computeProjectDeadline({
   requestedMinutes = 5,
@@ -271,7 +273,10 @@ export function computeProjectDeadline({
   const outerSeconds = Math.max(90, Number(mcpTimeoutSeconds) || 300);
   const safeTotalSeconds = Math.max(60, outerSeconds - 25);
   const attemptCount = initialAttempt < 2 && ((mode === "implement" && runGate) || allowWorkerFailover) ? 2 : 1;
-  const gateSecondsEach = runGate ? 15 : 0;
+  // Nested package discovery can make the Gate run a real test suite. Fifteen
+  // seconds was enough only for metadata checks and caused valid projects to
+  // time out before independent verification completed.
+  const gateSecondsEach = runGate ? GATE_TIMEOUT_SECONDS : 0;
   const overheadSeconds = 10;
   const plannerTimeoutSeconds = hasPlanner ? Math.min(45, Math.max(30, Math.floor(safeTotalSeconds * 0.16))) : 0;
   const workerPoolSeconds = Math.max(
@@ -359,7 +364,11 @@ export function buildWorkerFailoverTask(workerResult = {}, failure = {}, fromRou
 
 export function selectProjectMode(task = "", requested = "auto") {
   if (["inspect", "implement"].includes(requested)) return requested;
-  return INSPECTION_WORDS.test(String(task)) ? "inspect" : "implement";
+  const text = String(task);
+  // Mixed requests such as "find and fix" or "分析并修复" authorize writes.
+  // Mutation intent therefore takes precedence over inspection vocabulary.
+  if (MUTATION_WORDS.test(text)) return "implement";
+  return INSPECTION_WORDS.test(text) ? "inspect" : "implement";
 }
 
 export function selectProjectWorker(task = "", mode = "implement", preferred = "auto") {

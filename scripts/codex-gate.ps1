@@ -108,6 +108,34 @@ function Get-PackageScripts {
   }
 }
 
+function Find-PackageRoots {
+  param([string]$Root, [string[]]$Files)
+
+  $resolvedRoot = [System.IO.Path]::GetFullPath($Root).TrimEnd([char[]]@('\','/'))
+  $roots = New-Object System.Collections.Generic.List[string]
+  $rootPackage = Join-Path $resolvedRoot "package.json"
+  if (Test-Path -LiteralPath $rootPackage -PathType Leaf) {
+    $roots.Add($resolvedRoot)
+  }
+
+  foreach ($file in @($Files)) {
+    if ([string]::IsNullOrWhiteSpace($file)) { continue }
+    $absolute = [System.IO.Path]::GetFullPath((Join-Path $resolvedRoot $file))
+    $current = Split-Path -Parent $absolute
+    while ($current -and ($current -eq $resolvedRoot -or $current.StartsWith("$resolvedRoot\", [System.StringComparison]::OrdinalIgnoreCase))) {
+      if (Test-Path -LiteralPath (Join-Path $current "package.json") -PathType Leaf) {
+        if (-not $roots.Contains($current)) { $roots.Add($current) }
+        break
+      }
+      if ($current -eq $resolvedRoot) { break }
+      $parent = Split-Path -Parent $current
+      if ($parent -eq $current) { break }
+      $current = $parent
+    }
+  }
+  return @($roots)
+}
+
 function Has-Script {
   param($Scripts, [string[]]$Names)
   foreach ($name in $Names) {
@@ -487,25 +515,28 @@ try {
   }
 
   $steps = @()
-  $packageJson = Join-Path $Cwd "package.json"
-  $scripts = Get-PackageScripts -PackageJson $packageJson
-  if ($scripts.Count -gt 0) {
-    $buildScript = Has-Script -Scripts $scripts -Names @("build", "compile")
-    $testScript = Has-Script -Scripts $scripts -Names @("test")
-    $typeScript = Has-Script -Scripts $scripts -Names @("typecheck", "type-check", "check-types", "tsc")
-    $lintScript = Has-Script -Scripts $scripts -Names @("lint")
+  $packageRoots = @(Find-PackageRoots -Root $Cwd -Files $changedFiles)
+  foreach ($packageRoot in $packageRoots) {
+    $packageJson = Join-Path $packageRoot "package.json"
+    $scripts = Get-PackageScripts -PackageJson $packageJson
+    if ($scripts.Count -gt 0) {
+      $buildScript = Has-Script -Scripts $scripts -Names @("build", "compile")
+      $testScript = Has-Script -Scripts $scripts -Names @("test")
+      $typeScript = Has-Script -Scripts $scripts -Names @("typecheck", "type-check", "check-types", "tsc")
+      $lintScript = Has-Script -Scripts $scripts -Names @("lint")
 
-    if ($buildScript) {
-      $steps += Invoke-Step -Name "code can run/build" -Command "npm run $buildScript" -WorkDir $Cwd -TimeoutSec $CommandTimeoutSec
-    }
-    if ($testScript) {
-      $steps += Invoke-Step -Name "tests" -Command "npm run $testScript" -WorkDir $Cwd -TimeoutSec $CommandTimeoutSec
-    }
-    if ($typeScript) {
-      $steps += Invoke-Step -Name "type check" -Command "npm run $typeScript" -WorkDir $Cwd -TimeoutSec $CommandTimeoutSec
-    }
-    if ($lintScript) {
-      $steps += Invoke-Step -Name "lint" -Command "npm run $lintScript" -WorkDir $Cwd -TimeoutSec $CommandTimeoutSec
+      if ($buildScript) {
+        $steps += Invoke-Step -Name "code can run/build" -Command "npm run $buildScript" -WorkDir $packageRoot -TimeoutSec $CommandTimeoutSec
+      }
+      if ($testScript) {
+        $steps += Invoke-Step -Name "tests" -Command "npm run $testScript" -WorkDir $packageRoot -TimeoutSec $CommandTimeoutSec
+      }
+      if ($typeScript) {
+        $steps += Invoke-Step -Name "type check" -Command "npm run $typeScript" -WorkDir $packageRoot -TimeoutSec $CommandTimeoutSec
+      }
+      if ($lintScript) {
+        $steps += Invoke-Step -Name "lint" -Command "npm run $lintScript" -WorkDir $packageRoot -TimeoutSec $CommandTimeoutSec
+      }
     }
   }
 
@@ -517,6 +548,14 @@ try {
   if ($null -ne $browserSmoke) {
     $steps += $browserSmoke
   }
+
+  $sourceChangePattern = "(?i)\.(?:c|cc|cpp|cxx|cs|go|h|hpp|java|js|jsx|mjs|cjs|ts|tsx|py|rb|rs|php|ps1|sh)$"
+  $sourceFilesChanged = @($changedFiles | Where-Object { $_ -match $sourceChangePattern })
+  $verificationSteps = @($steps | Where-Object {
+    $_.Name -in @("code can run/build", "tests", "type check", "lint", "html smoke", "browser smoke") -and
+    $_.Status -ne "not_detected"
+  })
+  $verificationEvidenceMissing = $sourceFilesChanged.Count -gt 0 -and $verificationSteps.Count -eq 0
 
   $hardFails = @()
   if (-not $isGit) { $hardFails += "not a git repository, cannot inspect diff safely" }
@@ -535,6 +574,7 @@ try {
   $score = 95
   if ($RequirementStatus -eq "unknown") { $score -= 10 }
   if ($RequirementStatus -eq "partial") { $score -= 15 }
+  if ($verificationEvidenceMissing) { $score -= 10 }
   if ($dependencyFiles.Count -gt 0) { $score -= 5 }
   if ($diffLines -gt [math]::Floor($effectiveMaxDiffLines * 0.75)) { $score -= 5 }
   if ($changedFiles.Count -gt [math]::Floor($effectiveMaxChangedFiles * 0.75)) { $score -= 5 }
@@ -560,7 +600,10 @@ try {
   function Get-StepStatus([string]$Name) {
     $matched = @($steps | Where-Object Name -eq $Name)
     if ($matched.Count -eq 0) { return "not_detected" }
-    return [string]$matched[0].Status
+    if (@($matched | Where-Object Status -eq "timeout").Count -gt 0) { return "timeout" }
+    if (@($matched | Where-Object Status -eq "fail").Count -gt 0) { return "fail" }
+    if (@($matched | Where-Object Status -eq "pass").Count -gt 0) { return "pass" }
+    return "not_detected"
   }
 
   $handoff = [ordered]@{
@@ -581,6 +624,7 @@ try {
       lint = Get-StepStatus "lint"
       html_smoke = Get-StepStatus "html smoke"
       browser_smoke = Get-StepStatus "browser smoke"
+      verification_evidence = $(if (-not $verificationEvidenceMissing) { $(if ($sourceFilesChanged.Count -gt 0) { "pass" } else { "not_required" }) } else { "fail" })
       scope = $(if ($scopeViolations.Count -eq 0) { "pass" } else { "fail" })
       secrets = $(if ($secretHits.Count -eq 0) { "pass" } else { "fail" })
       diff_size = $(if ($diffLines -le $effectiveMaxDiffLines -and $changedFiles.Count -le $effectiveMaxChangedFiles) { "pass" } else { "fail" })
@@ -594,6 +638,8 @@ try {
       git_baseline = $gitBaseline
       max_changed_files = $effectiveMaxChangedFiles
       max_diff_lines = $effectiveMaxDiffLines
+      package_roots = $packageRoots.Count
+      verification_steps = $verificationSteps.Count
     }
     artifacts = [ordered]@{
       gate_report = $reportPath
@@ -631,13 +677,16 @@ try {
   $lines += "Forbidden files changed: $($forbiddenFiles.Count)"
   $lines += "Secret/API-key hits: $($secretHits.Count)"
   $lines += "Scope violations: $($scopeViolations.Count)"
+  $lines += "Detected package roots: $($packageRoots.Count)"
+  $lines += "Executable verification steps: $($verificationSteps.Count)"
   $lines += ""
   $lines += "## Gate Criteria"
   $lines += ""
-  $lines += "- Code can run/build: $($(if (($steps | Where-Object Name -eq 'code can run/build').Count -eq 0) { 'not detected' } else { ($steps | Where-Object Name -eq 'code can run/build')[0].Status }))"
-  $lines += "- Tests pass: $($(if (($steps | Where-Object Name -eq 'tests').Count -eq 0) { 'not detected' } else { ($steps | Where-Object Name -eq 'tests')[0].Status }))"
-  $lines += "- Type check pass: $($(if (($steps | Where-Object Name -eq 'type check').Count -eq 0) { 'not detected' } else { ($steps | Where-Object Name -eq 'type check')[0].Status }))"
-  $lines += "- Lint pass: $($(if (($steps | Where-Object Name -eq 'lint').Count -eq 0) { 'not detected' } else { ($steps | Where-Object Name -eq 'lint')[0].Status }))"
+  $lines += "- Code can run/build: $(Get-StepStatus 'code can run/build')"
+  $lines += "- Tests pass: $(Get-StepStatus 'tests')"
+  $lines += "- Type check pass: $(Get-StepStatus 'type check')"
+  $lines += "- Lint pass: $(Get-StepStatus 'lint')"
+  $lines += "- Independent verification evidence: $($(if ($verificationEvidenceMissing) { 'missing' } elseif ($sourceFilesChanged.Count -gt 0) { 'present' } else { 'not required' }))"
   $lines += "- HTML smoke pass: $($(if (($steps | Where-Object Name -eq 'html smoke').Count -eq 0) { 'not detected' } else { ($steps | Where-Object Name -eq 'html smoke')[0].Status }))"
   $lines += "- Forbidden files unchanged: $([bool]($forbiddenFiles.Count -eq 0))"
   $lines += "- Diff size acceptable: $([bool]($diffLines -le $effectiveMaxDiffLines -and $changedFiles.Count -le $effectiveMaxChangedFiles))"

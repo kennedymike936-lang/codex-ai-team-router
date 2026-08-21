@@ -6,6 +6,8 @@ All notable changes to this project will be documented here. The format follows 
 
 ### Added
 
+- `routine_workpack` for exception-driven execution of up to 12 bounded chores with separate read-only and single-writer lanes, a mandatory implementation Gate, compact success receipts, and Codex escalation packets.
+- A disabled `openai:gpt-5.6-luna` high-volume worker slot plus dated built-in capability, context, and pricing metadata. No Luna request or local write path is enabled.
 - One bounded assistant/harness failover for local `project_task` turn limits, timeouts, transient provider failures, process failures, and malformed structured output.
 - Extensible Provider Registry with native Gemini REST, native OpenAI Responses, and administrator-configured generic OpenAI-compatible adapters.
 - Opt-in SiliconFlow adapter with conservative pricing, privacy, data-boundary, and content-policy metadata.
@@ -17,6 +19,9 @@ All notable changes to this project will be documented here. The format follows 
 
 ### Changed
 
+- Mixed inspection-and-mutation prompts now route to implementation so requests such as “find and fix” and “分析并修复” do not silently become read-only work.
+- The Gate discovers nested Node package roots from changed paths and requires executable verification evidence for source-code changes before accepting them.
+- The project Gate timeout budget increased from 15 to 45 seconds so discovered subproject checks can finish.
 - Large-output workers receive an explicit wall-clock stop policy, a longer primary completion window, and a narrower focused fallback window.
 - Worker failover preserves completed partial files and identifies remaining scope from the allowed paths and current workspace diff.
 - `project_task` recovers structured partial handoffs from nonzero PowerShell exits so timed-out workers retain changed files, exact usage, and the correct failover classification.

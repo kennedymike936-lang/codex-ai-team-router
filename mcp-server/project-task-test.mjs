@@ -32,6 +32,12 @@ test("routes implementation to one DeepSeek worker by default", () => {
   assert.equal(selectProjectWorker("Fix the TypeScript build", "implement"), "deepseek");
 });
 
+test("mutation intent takes precedence over inspection words", () => {
+  assert.equal(selectProjectMode("Find and implement the missing test"), "implement");
+  assert.equal(selectProjectMode("分析现有代码并修复这个问题"), "implement");
+  assert.equal(selectProjectMode("Inspect the logs and update the parser"), "implement");
+});
+
 test("uses one noninteractive worker plus a deterministic gate", () => {
   const preview = previewProjectTask({ task: "Implement the feature", approval: "auto" });
   assert.equal(preview.mode, "implement");
@@ -132,8 +138,9 @@ test("gives the first large worker enough time to finish one provider response",
     initialAttempt: 1,
     mcpTimeoutSeconds: 300,
   });
-  assert.deepEqual(deadline.attempt_timeout_seconds, [190, 45]);
-  assert.deepEqual(deadline.max_wall_time_seconds, [182, 37]);
+  assert.equal(deadline.gate_timeout_seconds, 45);
+  assert.deepEqual(deadline.attempt_timeout_seconds, [140, 35]);
+  assert.deepEqual(deadline.max_wall_time_seconds, [132, 27]);
 });
 
 test("keeps focused scouts cheap and marks unavailable usage explicitly", () => {

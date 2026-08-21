@@ -11,7 +11,7 @@ const transport = new StdioClientTransport({
 await client.connect(transport);
 const listed = await client.listTools();
 const names = listed.tools.map((tool) => tool.name).sort();
-const expected = ["delegate_task", "doctor", "grok_search", "project_task", "worker_gate_review"];
+const expected = ["delegate_task", "doctor", "grok_search", "project_task", "routine_workpack", "worker_gate_review"];
 
 for (const name of expected) {
   if (!names.includes(name)) throw new Error(`Missing MCP tool: ${name}`);
@@ -59,6 +59,25 @@ if (projectPreviewJson.mode !== "implement" || projectPreviewJson.worker !== "de
   throw new Error(`Unexpected project dry-run: ${JSON.stringify(projectPreviewJson)}`);
 }
 
+const workpackPreview = await client.callTool({
+  name: "routine_workpack",
+  arguments: {
+    cwd: process.cwd(),
+    dry_run: true,
+    items: [
+      { id: "docs", task: "Update README", allowed_paths: ["README.md"] },
+      { id: "deploy", task: "Deploy to production", allowed_paths: ["deploy"] },
+    ],
+  },
+});
+const workpackPreviewJson = JSON.parse(workpackPreview.content?.[0]?.text || "{}");
+if (workpackPreviewJson.autonomous_count !== 1 || workpackPreviewJson.escalation_count !== 1) {
+  throw new Error(`Unexpected workpack dry run: ${JSON.stringify(workpackPreviewJson)}`);
+}
+if (workpackPreviewJson.worker_slots?.[0]?.model !== "gpt-5.6-luna") {
+  throw new Error(`Missing reserved Luna worker slot: ${JSON.stringify(workpackPreviewJson.worker_slots)}`);
+}
+
 const quality = await client.callTool({
   name: "worker_gate_review",
   arguments: {
@@ -84,5 +103,6 @@ console.log(`MCP tools: ${names.join(", ")}`);
 console.log(`Dry run: ${previewText}`);
 console.log(`Grok dry run: ${grokPreviewText}`);
 console.log(`Project dry run: ${projectPreviewJson.worker} -> gate ${projectPreviewJson.run_gate}`);
+console.log(`Routine workpack: ${workpackPreviewJson.autonomous_count} autonomous, ${workpackPreviewJson.escalation_count} escalated`);
 console.log(`Quality gate: ${handoff.score} -> ${handoff.decision}`);
 await client.close();

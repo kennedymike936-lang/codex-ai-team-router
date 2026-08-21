@@ -6,6 +6,7 @@ $fixture = Join-Path ([System.IO.Path]::GetTempPath()) "codex-ai-team-gate-$([gu
 $gate = Join-Path $PSScriptRoot "codex-gate.ps1"
 $outRoot = "$fixture-runs"
 $unbornFixture = "$fixture-unborn"
+$nestedFixture = "$fixture-nested"
 
 function Invoke-FixtureGate {
   param(
@@ -45,7 +46,8 @@ try {
   git config user.name "AI Team Test"
   git config user.email "ai-team-test@example.invalid"
   "fixture" | Set-Content -LiteralPath "README.md" -Encoding UTF8
-  git add README.md
+  '{"scripts":{"test":"node --check src/app.js"}}' | Set-Content -LiteralPath "package.json" -Encoding UTF8
+  git add README.md package.json
   git commit -q -m "fixture"
   "export const ready = true;" | Set-Content -LiteralPath "src\app.js" -Encoding UTF8
   Pop-Location
@@ -149,15 +151,40 @@ try {
     "export const untracked = true;" | Set-Content -LiteralPath "src\untracked.js" -Encoding UTF8
     $unbornRaw = & $gate -Cwd "." -TaskId "unborn" -Attempt 1 -RequirementStatus pass -AllowedPath @("src") -OutRoot $outRoot -JsonOnly
     $unborn = ($unbornRaw -join "`n") | ConvertFrom-Json
-    Assert-Decision $unborn "accept" 95
+    Assert-Decision $unborn "retry" 85
     if ($unborn.metrics.git_baseline -ne "unborn" -or $unborn.changed_files.Count -ne 2) {
       throw "Expected unborn baseline with two changed files."
+    }
+    if ($unborn.checks.verification_evidence -ne "fail") {
+      throw "Expected source changes without executable checks to require verification."
     }
   } finally {
     Pop-Location
   }
 
-  Write-Host "PowerShell gate: 14 scenarios passed"
+  New-Item -ItemType Directory -Force -Path (Join-Path $nestedFixture "packages\app\src") | Out-Null
+  Push-Location $nestedFixture
+  try {
+    git init -q
+    git config user.name "AI Team Test"
+    git config user.email "ai-team-test@example.invalid"
+    "nested fixture" | Set-Content -LiteralPath "README.md" -Encoding UTF8
+    '{"scripts":{"test":"node --check src/app.js"}}' | Set-Content -LiteralPath "packages\app\package.json" -Encoding UTF8
+    git add README.md packages/app/package.json
+    git commit -q -m "nested fixture"
+    "export const nested = true;" | Set-Content -LiteralPath "packages\app\src\app.js" -Encoding UTF8
+    $nestedRaw = & $gate -Cwd "." -TaskId "nested" -Attempt 1 -RequirementStatus pass `
+      -AllowedPath @("packages/app") -ChangedPathJson '["packages/app/src/app.js"]' -OutRoot $outRoot -JsonOnly
+    $nested = ($nestedRaw -join "`n") | ConvertFrom-Json
+    Assert-Decision $nested "accept" 95
+    if ($nested.checks.tests -ne "pass" -or $nested.checks.verification_evidence -ne "pass" -or $nested.metrics.package_roots -ne 1) {
+      throw "Expected Gate to discover and validate the nested package root."
+    }
+  } finally {
+    Pop-Location
+  }
+
+  Write-Host "PowerShell gate: 16 scenarios passed"
 } finally {
   if ((Get-Location).Path -eq $fixture) { Pop-Location }
   if (Test-Path -LiteralPath $fixture) {
@@ -168,5 +195,8 @@ try {
   }
   if (Test-Path -LiteralPath $unbornFixture) {
     Remove-Item -LiteralPath $unbornFixture -Recurse -Force
+  }
+  if (Test-Path -LiteralPath $nestedFixture) {
+    Remove-Item -LiteralPath $nestedFixture -Recurse -Force
   }
 }

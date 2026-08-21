@@ -41,13 +41,14 @@ flowchart LR
 
 ## 为什么只保留一个 MCP
 
-为每个模型各加载一套 MCP，会让每个 Codex 会话携带更多工具定义。本项目只保留一个 MCP，并暴露六个紧凑工具：
+为每个模型各加载一套 MCP，会让每个 Codex 会话携带更多工具定义。本项目只保留一个 MCP，并暴露七个紧凑工具：
 
 - `delegate_task`：处理不需要本地文件工具的问答、草稿和分析；按任务复杂度自动选择一个或两个代码 Worker，复杂且依赖实时资料时再加入 Grok。
 - `grok_search`：一次只读 Web Search 或 X Search，`source=auto` 时一般实时资讯走 Web、帖子和舆论走 X；默认限制一个服务端工具回合。
 - `budget_route`：在用户主动配置的 OpenRouter、Groq、Gemini、OpenAI Responses 或管理员配置的 OpenAI-compatible 服务范围内，按能力、已知价格、隐私、延迟、健康状态和剩余限额解释并选择模型；默认只预览。
 - `doctor`：只读检查 Node、PowerShell、Git、Qwen 外壳、各 Provider 凭证是否存在，以及 MCP/Windows 系统代理是否配置；只返回布尔状态和安全建议，不读取或返回密钥、代理 URL 与凭证，也不发起模型调用。
 - `project_task`：把一整段本地侦查或实现交给自动扩编的 Qwen/DeepSeek 团队；实现后可自动运行确定性 Gate，只把交接包返回 Codex。
+- `routine_workpack`：最多把 12 项低/中风险杂活编译成顺序执行的只读 Lane 与单 Writer Lane，代码改动统一过 Gate；高风险、破坏性、外部写入和没有 `allowed_paths` 的实现项不会下发，只作为精简异常包升级给 Codex。
 - `worker_gate_review`：对结构化结果做确定性质量决策，也兼容原有的 diff 轻量审查。
 
 三个服务商仍是独立线路，只通过一个入口调度。
@@ -57,6 +58,7 @@ flowchart LR
 - 自动按任务长度、验收项、架构范围、风险、跨领域数量和交互系统数量判定 `small / medium / complex`：小任务 1 个助手，复杂单页游戏等中大型任务会增加只读规划助手，复杂且需要实时资料时最多 3 个助手。
 - 多助手实现采用“只读规划/侦查 -> 单个 Worker 写入 -> Gate 验收”，两个代码助手不会并发修改同一个工作目录。
 - `project_task` 把文件发现、批量编辑和验证合并成一个 MCP 回合，避免 Codex 自己形成几十次 shell 循环。
+- `routine_workpack` 采用例外管理：常规项合并执行并只返回通过回执，风险项和 Gate 未接受项才进入 Codex 异常包；实现任务始终保持单 Writer，并强制经过 Gate，调用方不能关闭。
 - Grok Search 默认 `max_turns=1`、关闭并行工具，只允许 X 或 Web 二选一，控制搜索调用费用。
 - 默认从服务商 `/models` 接口发现账号当前可用模型，并按代际与 `Flash / Plus / Pro` 档位自动选择。
 - 模型列表缓存一小时；新一代稳定别名上线后无需修改配置，模型不可用时同服务商最多回退一次。
@@ -67,6 +69,7 @@ flowchart LR
 - 只读 Scout 按任务复杂度使用 3 / 4 / 6 个 agent 回合，并预留最终结论轮；实现 Worker 由独立复杂度策略控制且不超过 12 回合。
 - Scout 专门处理大目录、日志、文件定位和第一遍项目调查。
 - Gate 检查构建、测试、类型检查、lint、HTML 内联脚本语法、diff 大小、依赖变化和密钥痕迹。
+- Gate 会沿变更文件向上发现嵌套 `package.json`；源代码发生变化但没有任何可执行验证证据时，最高只能返工或接管，不能直接以 95 分接受。
 - 质量策略固定为：90 分以上接受、80～89 分只返工一次、低于 80 分由 Codex 接管。
 - `project_task` 在首次 Gate 返回 `retry` 时会在同一个 MCP 调用内自动执行一次定向返工，并合并两轮修改和用量；第二轮仍不合格才交给 Codex。
 - Scout/Worker 遇到轮次上限、超时、429/5xx、进程或结构化输出故障时，最多自动切换一次到独立助手/外壳；认证、权限、Key 配置和安全错误立即停止。
@@ -308,6 +311,7 @@ doctor
 grok_search
 budget_route
 project_task
+routine_workpack
 worker_gate_review
 ```
 
@@ -375,6 +379,36 @@ worker_gate_review
 ```
 
 只读侦查时把 `mode` 设为 `inspect`。`max_assistants` 是费用上限，不是固定人数；自动调度只会使用必要的助手。`worker_failover` 默认开启：轮次上限、超时、429/5xx、进程或输出解析故障会最多切换一次（Qwen 外壳故障优先改走 `DeepSeek + Claude` 独立外壳），再失败则由 Codex 接管；认证、权限、Key 配置和安全错误不会切换。实现模式默认使用非交互权限，非 Git 目录会先初始化本地 Git 基线；允许路径、Git diff、密钥扫描和项目检查由 Gate 兜底。首次 Gate 只要求返工时，`project_task` 会内部自动完成第二次定向尝试，无需 Codex 再发一次 MCP 请求。完整产物留在 `%USERPROFILE%\.codex-ai-team\runs`，MCP 只返回短摘要和路径。
+
+把多项日常杂活合成一个例外驱动工作包：
+
+```json
+{
+  "cwd": "C:\\path\\to\\project",
+  "items": [
+    {
+      "id": "docs",
+      "task": "根据当前 CLI 更新 README 示例",
+      "allowed_paths": ["README.md"]
+    },
+    {
+      "id": "parser-tests",
+      "task": "补充 parser 的空输入边界测试",
+      "allowed_paths": ["test/parser.test.js"]
+    },
+    {
+      "id": "production",
+      "task": "部署到生产环境",
+      "allowed_paths": ["deploy"]
+    }
+  ],
+  "budget": "low"
+}
+```
+
+前两项会进入同一个单 Writer 批次；生产部署属于高风险项，不会交给 Worker，只会出现在返回给 Codex 的 `escalations` 中。显式写 `risk: "low"` 不能把检测到的高风险任务降级。
+
+GPT-5.6 Luna 已预留为 `openai:gpt-5.6-luna` 高频杂活 Worker 槽位，并带有官方上下文、能力和价格目录元数据。当前槽位保持 `reserved`：没有显式开关、`OPENAI_API_KEY` 和独立的本地有界工具 Runner 时，它不会执行任务，更不会获得本地写权限。现有 OpenAI Responses 适配器仍只用于用户主动选择的 `budget_route`。
 
 确定性质量决策（不调用模型 API）：
 
@@ -492,8 +526,9 @@ Gate 会尽可能检查：
 6. 是否修改敏感或禁止文件
 7. diff 是否过大或改动依赖文件
 8. diff 是否包含疑似 API key / private key
+9. 源代码修改是否至少获得一项真实的构建、测试、类型、lint 或烟测证据
 
-Gate 会在运行目录下写入：
+对 Node 项目，Gate 会从每个变更文件向上查找最近的 `package.json`，因此从 monorepo 根目录运行时也能执行相关子项目的脚本。Gate 会在运行目录下写入：
 
 - `gate.md`：供人阅读的检查报告。
 - `handoff.json`：供 Codex 接管的精简状态包，包含任务、分数、失败项、修改文件和完整产物路径。
@@ -637,6 +672,8 @@ AI_TEAM_TOOLS_DIR
 
 - MCP Router 尽量轻量，没有引入完整多 agent 框架。
 - 路由规则是启发式，不会永远选中最合适的模型。
+- `routine_workpack` 当前最多生成一个只读批次和一个单 Writer/Gate 批次，不是持久后台队列；相互冲突或必须独立验收的任务应拆成多个调用。
+- Luna 目前只有目录元数据和禁用槽位；本地有界 Runner 完成并通过代表性评测前不会自动启用。
 - PowerShell worker 主要面向 Windows；MCP Router 本身基于 Node.js，改造后可在其他系统运行。
 - 工具描述和返回内容刻意保持短小，以降低长期上下文负担。
 
