@@ -131,6 +131,7 @@ export async function runRoutineWorkpack(args = {}, {
         // verification is part of the contract and cannot be bypassed.
         run_gate: batch.mode === "implement",
         worker_failover: args.worker_failover !== false,
+        worktree_isolation: args.worktree_isolation !== false,
       });
     } catch (error) {
       execution = { status: "error", summary: compact(error?.message || error, 240) };

@@ -19,6 +19,10 @@ The project is designed for Windows-based maintainer workflows. It combines mode
 - Compact MCP responses with full worker artifacts stored locally.
 - Exception-driven routine workpacks: up to 12 bounded chores are split into a read-only lane and one writer lane with a mandatory Gate, while risky or unbounded items are returned to Codex as a compact exception packet.
 - Local token and cost ledgers based on provider-reported usage when available.
+- Persistent provider/model health and cooldown state, with retryable failures separated from terminal authentication, permission, invalid-request, and safety failures.
+- Clean Git implementations run in temporary detached worktrees; accepted Gate patches return only when the original HEAD and clean state are unchanged.
+- Redacted route decisions and resumable checkpoints feed a read-only shadow analyzer; routing weights are never changed automatically.
+- On Windows, the router can inherit the enabled system HTTP/HTTPS proxy and safely move past a stale explicit loopback endpoint only after a pre-connect failure; diagnostics never expose endpoints or credentials.
 - Explainable, budget-aware OpenRouter and Groq selection with conservative capability and privacy filtering.
 - An isolated eight-task benchmark with hidden acceptance checks.
 

@@ -26,6 +26,50 @@ assert.equal(proxyConfig.enabled, true);
 assert.equal(proxyConfig.mode, "fallback");
 assert.match(proxyConfig.noProxy, /localhost/);
 assert.equal(Object.values(proxyConfig).join(" ").includes("password"), false);
+
+{
+  const routes = [];
+  const fetchWithProxyRecovery = createResilientFetch({
+    env: { HTTPS_PROXY: "http://127.0.0.1:7890", AI_TEAM_PROXY_MODE: "always" },
+    dispatcherFactory: () => ({ proxy: true }),
+    sleepImpl: async () => {},
+    fetchImpl: async (_url, options) => {
+      routes.push(options.dispatcher ? "proxy" : "direct");
+      if (options.dispatcher) {
+        const error = new Error("proxy refused");
+        error.code = "ECONNREFUSED";
+        throw error;
+      }
+      return new Response("ok", { status: 200 });
+    },
+  });
+  const response = await fetchWithProxyRecovery("https://api.x.ai/v1/language-models");
+  assert.equal(response.status, 200);
+  assert.deepEqual(routes, ["proxy", "direct"]);
+}
+
+{
+  const routes = [];
+  const fetchWithStaleExplicitAndSystem = createResilientFetch({
+    env: { AI_TEAM_TRUSTED_PROXY_URL: "http://127.0.0.1:7001", AI_TEAM_PROXY_MODE: "always" },
+    inheritSystemProxy: true,
+    systemProxyResolver: () => "http://127.0.0.1:7002",
+    dispatcherFactory: (config) => ({ source: config.source }),
+    sleepImpl: async () => {},
+    fetchImpl: async (_url, options) => {
+      routes.push(options.dispatcher?.source || "direct");
+      if (options.dispatcher?.source === "explicit") {
+        const error = new Error("stale explicit proxy refused");
+        error.code = "ECONNREFUSED";
+        throw error;
+      }
+      return new Response("ok", { status: 200 });
+    },
+  });
+  const response = await fetchWithStaleExplicitAndSystem("https://api.x.ai/v1/language-models");
+  assert.equal(response.status, 200);
+  assert.deepEqual(routes, ["explicit", "windows_system"]);
+}
 assert.equal(trustedProxyConfig({ ALL_PROXY: "socks5://127.0.0.1:1080" }).enabled, false);
 
 {

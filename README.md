@@ -76,6 +76,10 @@ flowchart LR
 - 联网请求会区分 DNS、连接超时/拒绝、网络不可达、连接重置、TLS 和请求超时；安全可重放的失败最多重试一次，付费 POST 在送达状态不明时不会自动重放。
 - 构建/测试失败、密钥痕迹、越界修改等硬故障会跳过返工，立即要求 Codex 接管。
 - Planner、Scout、Worker 和 Gate 贯穿同一个 `project-*` 任务 ID 并生成 JSON 交接文件，Codex 接手时无需重新扫描整个项目。
+- 干净且已有提交的 Git 项目默认在临时 detached worktree 中执行；只有 Gate 接受且原工作区 HEAD/干净状态未变化时才安全回灌，其他情况保留隔离目录并交给 Codex。
+- 每次工程或预算路由生成不含提示词、密钥和代理地址的 `route-decision.json`；工程阶段同时更新 `checkpoint.json`，中断后可用相同 `task_id` 与 `resume=true` 接续。
+- Provider 健康与 cooldown 跨运行持久化；只读 evolution 分析把路由、Gate、token 和耗时连成 shadow 闭环，但不会自动修改生产权重。
+- Windows 上会安全继承已启用的系统 HTTP/HTTPS 代理；若显式 loopback 代理已失效，可在仅预连接失败时尝试当前系统代理，地址和凭证不会进入诊断或审计文件。
 - 即使底层模型因墙钟超时以非零状态结束，`project_task` 也会回收结构化交接，保留已修改文件、真实失败类型和精确用量后再决定接力。
 - 没有首次提交的 Git 仓库使用 `unborn` 基线，不再误判为非 Git 项目。
 - API key 只从环境变量读取，不写入代码或 Codex 配置示例。

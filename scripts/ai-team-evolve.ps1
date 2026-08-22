@@ -2,10 +2,13 @@
 param(
   [string]$UsageLedger = (Join-Path $env:USERPROFILE ".codex-ai-team\usage\worker-runs.jsonl"),
   [string]$OutRoot = (Join-Path $env:USERPROFILE ".codex-ai-team\evolution"),
+  [string]$AuditRoot = (Join-Path $env:USERPROFILE ".codex-ai-team\audit"),
   [ValidateRange(10, 5000)]
   [int]$Lookback = 500,
   [ValidateRange(1000, 1000000)]
   [long]$HighTokenThreshold = 20000,
+  [ValidateRange(2, 100)]
+  [int]$MinimumShadowSamples = 3,
   [switch]$JsonOnly
 )
 
@@ -42,6 +45,62 @@ $turnLimited = @($events | Where-Object {
   [string]$_.usage_reason -match "FatalTurnLimitedError|turn limit|max session turns"
 })
 $tokenValues = @($focusedHigh | ForEach-Object { [long]$_.total_tokens })
+
+# Join safe route-decision/checkpoint artifacts to provider-reported usage by
+# task_id. This is intentionally shadow-only: it produces evidence and
+# counterfactual suggestions but never changes production routing weights.
+$shadowRuns = @()
+if (Test-Path -LiteralPath $AuditRoot) {
+  foreach ($routeFile in @(Get-ChildItem -LiteralPath $AuditRoot -Filter "route-decision.json" -File -Recurse -ErrorAction SilentlyContinue)) {
+    try {
+      $route = Get-Content -LiteralPath $routeFile.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
+      $checkpointPath = Join-Path $routeFile.Directory.FullName "checkpoint.json"
+      $checkpoint = $(if (Test-Path -LiteralPath $checkpointPath) { Get-Content -LiteralPath $checkpointPath -Raw -Encoding UTF8 | ConvertFrom-Json } else { $null })
+      $taskEvents = @($events | Where-Object { [string]$_.task_id -eq [string]$route.task_id })
+      $tokens = [long](($taskEvents | Measure-Object -Property total_tokens -Sum).Sum)
+      $duration = [long](($taskEvents | Measure-Object -Property provider_duration_ms -Sum).Sum)
+      $decision = [string]$checkpoint.last_gate.decision
+      $shadowRuns += [pscustomobject]@{
+        task_id = [string]$route.task_id
+        route = "$([string]$route.selected.provider):$([string]$route.selected.id)"
+        accepted = $decision -eq "accept"
+        gate_decision = $decision
+        total_tokens = $tokens
+        provider_duration_ms = $duration
+      }
+    } catch {}
+  }
+}
+
+$routePerformance = @()
+foreach ($group in @($shadowRuns | Group-Object route)) {
+  $rows = @($group.Group)
+  $accepted = @($rows | Where-Object { $_.accepted }).Count
+  $routePerformance += [pscustomobject][ordered]@{
+    route = $group.Name
+    samples = $rows.Count
+    accepted = $accepted
+    acceptance_rate = $(if ($rows.Count -gt 0) { [math]::Round($accepted / $rows.Count, 4) } else { 0 })
+    median_total_tokens = Get-Median @($rows | ForEach-Object { [long]$_.total_tokens })
+    median_provider_duration_ms = Get-Median @($rows | ForEach-Object { [long]$_.provider_duration_ms })
+  }
+}
+
+$eligibleShadow = @($routePerformance | Where-Object { $_.samples -ge $MinimumShadowSamples } | Sort-Object @{Expression="acceptance_rate";Descending=$true}, @{Expression="median_total_tokens";Descending=$false})
+$counterfactuals = @()
+if ($eligibleShadow.Count -gt 1) {
+  $best = $eligibleShadow[0]
+  foreach ($current in @($eligibleShadow | Select-Object -Skip 1)) {
+    if ($best.acceptance_rate -gt $current.acceptance_rate -or ($best.acceptance_rate -eq $current.acceptance_rate -and $best.median_total_tokens -lt $current.median_total_tokens)) {
+      $counterfactuals += [ordered]@{
+        current_route = $current.route
+        shadow_route = $best.route
+        evidence = "$($best.samples) vs $($current.samples) samples; acceptance $($best.acceptance_rate) vs $($current.acceptance_rate); median tokens $($best.median_total_tokens) vs $($current.median_total_tokens)"
+        action = "observe_only"
+      }
+    }
+  }
+}
 
 $recommendations = @()
 if ($focusedHigh.Count -gt 0) {
@@ -98,10 +157,18 @@ $report = [ordered]@{
   schema_version = "1.0"
   generated_at = (Get-Date).ToUniversalTime().ToString("o")
   mode = "read_only_proposal"
-  source = "usage_ledger_metrics_only"
+  source = "usage_ledger_and_route_audit_metrics"
   events_read = $events.Count
   thresholds = [ordered]@{ high_token_focused_inspection = $HighTokenThreshold; lookback = $Lookback }
   signals = $signals
+  shadow_mode = [ordered]@{
+    enabled = $true
+    auto_apply = $false
+    minimum_samples_per_route = $MinimumShadowSamples
+    joined_run_count = $shadowRuns.Count
+    route_performance = @($routePerformance)
+    counterfactuals = @($counterfactuals)
+  }
   evolution_state = [ordered]@{
     fingerprint = $fingerprint
     previous_fingerprint = $previousFingerprint

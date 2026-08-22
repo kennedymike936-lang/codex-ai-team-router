@@ -1,4 +1,5 @@
 import { EnvHttpProxyAgent, fetch as undiciFetch } from "undici";
+import { execFileSync } from "node:child_process";
 
 const PRECONNECT_CATEGORIES = new Set([
   "dns_failed",
@@ -33,20 +34,46 @@ function safeNoProxy(value) {
   return [...new Set(["localhost", "127.0.0.1", "::1", ...String(value || "").split(/[ ,]+/).filter(Boolean)])].join(",");
 }
 
-export function trustedProxyConfig(env = process.env) {
+export function windowsSystemProxyUrl() {
+  if (process.platform !== "win32") return "";
+  try {
+    const script = "$p=Get-ItemProperty -LiteralPath 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -ErrorAction Stop;if($p.ProxyEnable -ne 1){exit 0};[Console]::Out.Write([string]$p.ProxyServer)";
+    let value = String(execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+      encoding: "utf8", windowsHide: true, timeout: 3000,
+    }) || "").trim();
+    if (!value) return "";
+    if (value.includes("=")) {
+      const entries = Object.fromEntries(value.split(";").map((part) => part.split("=", 2)).filter((part) => part.length === 2));
+      value = entries.https || entries.http || "";
+    }
+    if (value && !/^https?:\/\//i.test(value)) value = `http://${value}`;
+    return validHttpProxy(value);
+  } catch {
+    return "";
+  }
+}
+
+export function trustedProxyConfig(env = process.env, systemProxyUrl = "") {
   const explicit = String(env.AI_TEAM_TRUSTED_PROXY_URL || "").trim();
   const allProxy = firstEnv(env, "all_proxy", "ALL_PROXY");
   const httpProxy = validHttpProxy(explicit || firstEnv(env, "http_proxy", "HTTP_PROXY") || allProxy);
   const httpsProxy = validHttpProxy(explicit || firstEnv(env, "https_proxy", "HTTPS_PROXY") || allProxy || httpProxy);
   const requestedMode = String(env.AI_TEAM_PROXY_MODE || "fallback").trim().toLowerCase();
   const mode = ["off", "fallback", "always"].includes(requestedMode) ? requestedMode : "fallback";
+  const proxies = [];
+  if (httpProxy || httpsProxy) proxies.push({ httpProxy, httpsProxy, source: explicit ? "explicit" : "environment" });
+  const systemProxy = validHttpProxy(systemProxyUrl);
+  if (systemProxy && !proxies.some((item) => item.httpProxy === systemProxy && item.httpsProxy === systemProxy)) {
+    proxies.push({ httpProxy: systemProxy, httpsProxy: systemProxy, source: "windows_system" });
+  }
   return {
-    configured: Boolean(httpProxy || httpsProxy),
-    enabled: mode !== "off" && Boolean(httpProxy || httpsProxy),
+    configured: proxies.length > 0,
+    enabled: mode !== "off" && proxies.length > 0,
     mode,
     httpProxy,
     httpsProxy,
     noProxy: safeNoProxy(firstEnv(env, "no_proxy", "NO_PROXY")),
+    proxies,
   };
 }
 
@@ -133,25 +160,30 @@ export function createResilientFetch({
     httpsProxy: config.httpsProxy || undefined,
     noProxy: config.noProxy || undefined,
   }),
+  inheritSystemProxy = env === process.env,
+  systemProxyResolver = windowsSystemProxyUrl,
 } = {}) {
-  const proxy = trustedProxyConfig(env);
-  let proxyDispatcher;
+  const proxy = trustedProxyConfig(env, inheritSystemProxy ? systemProxyResolver() : "");
+  const proxyDispatchers = new Map();
 
   return async function resilientFetch(url, options = {}) {
     const method = String(options.method || "GET").toUpperCase();
+    const proxyRoutes = proxy.proxies.map((config, index) => ({ kind: "proxy", config, index }));
     const attemptRoutes = proxy.enabled && proxy.mode === "always"
-      ? ["proxy", "proxy"]
+      ? [...proxyRoutes, { kind: "direct" }]
       : proxy.enabled && proxy.mode === "fallback"
-        ? ["direct", "proxy"]
-        : ["direct", "direct"];
+        ? [{ kind: "direct" }, ...proxyRoutes]
+        : [{ kind: "direct" }, { kind: "direct" }];
     let lastClassification = null;
 
     for (let attempt = 0; attempt < attemptRoutes.length; attempt += 1) {
       const route = attemptRoutes[attempt];
       const requestOptions = { ...options };
-      if (route === "proxy") {
-        proxyDispatcher ||= dispatcherFactory(proxy);
-        requestOptions.dispatcher = proxyDispatcher;
+      if (route.kind === "proxy") {
+        if (!proxyDispatchers.has(route.index)) {
+          proxyDispatchers.set(route.index, dispatcherFactory({ ...route.config, noProxy: proxy.noProxy }));
+        }
+        requestOptions.dispatcher = proxyDispatchers.get(route.index);
       }
       try {
         return await fetchImpl(url, requestOptions);
@@ -170,7 +202,7 @@ export function createResilientFetch({
             proxy: {
               configured: proxy.configured,
               mode: proxy.mode,
-              attempted: attemptRoutes.slice(0, attempt + 1).includes("proxy"),
+              attempted: attemptRoutes.slice(0, attempt + 1).some((item) => item.kind === "proxy"),
             },
           });
         }
@@ -185,7 +217,7 @@ export function createResilientFetch({
       method,
       attempts: attemptRoutes.length,
       delivery_uncertain: false,
-      proxy: { configured: proxy.configured, mode: proxy.mode, attempted: attemptRoutes.includes("proxy") },
+      proxy: { configured: proxy.configured, mode: proxy.mode, attempted: attemptRoutes.some((item) => item.kind === "proxy") },
     });
   };
 }

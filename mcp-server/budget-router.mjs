@@ -1,4 +1,5 @@
 import { adapterForProvider, redactKeys } from "./provider-adapters.mjs";
+import { ProviderHealthTracker } from "./provider-health.mjs";
 
 export const ROUTING_MODES = ["free_only", "balanced", "quality_first"];
 const KNOWN_CAPABILITIES = new Set(["code", "tools", "web"]);
@@ -170,8 +171,32 @@ export function createBudgetRouter({
   modelMetadata = {},
   capabilityCatalog = {},
   now = () => Date.now(),
+  healthTracker: providedTracker,
+  stateDir,
+  healthPersistence = false,
 } = {}) {
   const runtimeState = {};
+  // Lazily-created health tracker (persistent cooldown / failure state)
+  let _tracker;
+  function getTracker() {
+    if (!_tracker) {
+      // Build per-provider adapter gateways; default covers all providers
+      const tracker = new ProviderHealthTracker({ stateDir, persistent: healthPersistence });
+      tracker.isAuthOrPermissionStop = (s) => s === 401 || s === 403;
+      tracker.isSafeFallbackStatus = (s) => [402, 429, 498].includes(s) || (s >= 500 && s <= 599);
+      _tracker = tracker;
+    }
+    return _tracker;
+  }
+  const tracker = providedTracker || getTracker();
+  // Lazy-load persisted state on first access
+  function ensureLoaded() {
+    tracker.load(now());
+  }
+
+  function persistHealth() {
+    try { tracker.save(); } catch {}
+  }
 
   function updateRuntimeState(model, status, headers = {}) {
     const key = modelKey(model);
@@ -227,15 +252,24 @@ export function createBudgetRouter({
       if (!ROUTING_MODES.includes(mode)) {
         throw new Error(`Invalid mode: ${mode}. Must be one of: ${ROUTING_MODES.join(", ")}`);
       }
+      ensureLoaded();
+      // Exclude providers currently in cooldown from persistence tracker
+      const cooldownFilter = tracker.filterActiveCooldown(candidates, now());
+      const cooldownExcluded = cooldownFilter.excluded_with_reason.map((item) => ({
+        id: item.id,
+        provider: item.provider,
+        reason: "provider_cooldown",
+        remaining_ms: item.remaining_ms,
+      }));
       const normalized = normalizedRequirements(requirements);
-      const { eligible, excluded } = buildFallbackChain(candidates, mode, normalized, runtimeState);
+      const { eligible, excluded } = buildFallbackChain(cooldownFilter.included, mode, normalized, runtimeState);
       const fallback = eligible.map(({ model, score }) => candidateSummary(model, score));
       return {
         mode,
         requirements: normalized,
         candidates: candidates.map((model) => candidateSummary(model)),
         provider_exclusions,
-        excluded,
+        excluded: [...cooldownExcluded, ...excluded],
         selected: fallback[0] || null,
         fallback_chain: fallback,
       };
@@ -295,7 +329,14 @@ export function createBudgetRouter({
           }));
         } catch (error) {
           const safeError = redactKeys(error.message || String(error), Object.values(apiKeys));
-          attempts.push({ model: entry.id, provider: entry.provider, success: false, stopped: true, error: safeError });
+          const preconnect = error?.diagnostic?.preconnect === true;
+          if (tracker.shouldRecordCooldown(null, preconnect)) {
+            tracker.recordFailure(entry.provider, entry.id, null, null, now());
+            persistHealth();
+            attempts.push({ model: entry.id, provider: entry.provider, success: false, stopped: false, failure_kind: "preconnect_network", error: safeError });
+            continue;
+          }
+          attempts.push({ model: entry.id, provider: entry.provider, success: false, stopped: true, failure_kind: "network_delivery_uncertain", error: safeError });
           return { dry_run: false, explanation, result: null, attempts, error: safeError };
         }
 
@@ -306,6 +347,8 @@ export function createBudgetRouter({
           const error = redactKeys(`HTTP ${status}: ${body.slice(0, 300)}`, Object.values(apiKeys));
           if (adapter.isSafeFallbackStatus(status)) {
             const health = updateRuntimeState(entry, "fallback", headers);
+            tracker.recordFailure(entry.provider, entry.id, status, headers.retry_after, now());
+            persistHealth();
             attempts.push({
               model: entry.id,
               provider: entry.provider,
@@ -330,6 +373,8 @@ export function createBudgetRouter({
           return { dry_run: false, explanation, result: null, attempts, error };
         }
         const health = updateRuntimeState(entry, "success", headers);
+        tracker.recordSuccess(entry.provider, entry.id, headers, now());
+        persistHealth();
         const normalized = adapter.parseResponse(json);
         attempts.push({ model: entry.id, provider: entry.provider, success: true, status: 200, health });
         return {
@@ -358,4 +403,4 @@ export function createBudgetRouter({
   };
 }
 
-export const defaultBudgetRouter = createBudgetRouter();
+export const defaultBudgetRouter = createBudgetRouter({ healthPersistence: true });

@@ -6,6 +6,10 @@ All notable changes to this project will be documented here. The format follows 
 
 ### Added
 
+- Persistent provider/model health and cooldown state with bounded Retry-After handling, stale-entry pruning, atomic local persistence, and safe exclusion reasons.
+- Temporary detached Git worktree isolation for implementation tasks; accepted Gate results are applied back only when the original HEAD and clean state are unchanged.
+- Redacted `route-decision.json` and resumable `checkpoint.json` audit artifacts keyed by one end-to-end task ID.
+- Read-only shadow routing analysis that joins route decisions, Gate outcomes, token usage, and duration without automatically changing production weights.
 - `routine_workpack` for exception-driven execution of up to 12 bounded chores with separate read-only and single-writer lanes, a mandatory implementation Gate, compact success receipts, and Codex escalation packets.
 - A disabled `openai:gpt-5.6-luna` high-volume worker slot plus dated built-in capability, context, and pricing metadata. No Luna request or local write path is enabled.
 - One bounded assistant/harness failover for local `project_task` turn limits, timeouts, transient provider failures, process failures, and malformed structured output.
@@ -19,6 +23,8 @@ All notable changes to this project will be documented here. The format follows 
 
 ### Changed
 
+- Trusted-proxy `always` mode can recover from a pre-connect proxy refusal through one safe direct attempt; uncertain paid POST delivery is still never replayed.
+- Windows MCP processes inherit the enabled system proxy as a trusted fallback, fixing stale Codex loopback proxy endpoints without public discovery, node switching, or TLS bypass.
 - Mixed inspection-and-mutation prompts now route to implementation so requests such as “find and fix” and “分析并修复” do not silently become read-only work.
 - The Gate discovers nested Node package roots from changed paths and requires executable verification evidence for source-code changes before accepting them.
 - The project Gate timeout budget increased from 15 to 45 seconds so discovered subproject checks can finish.

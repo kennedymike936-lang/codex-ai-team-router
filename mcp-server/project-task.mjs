@@ -7,6 +7,8 @@ import { promisify } from "node:util";
 import { mechanicalInspect } from "./mechanical-inspector.mjs";
 import { planTaskTeam } from "./team-planner.mjs";
 import { buildTargetedRetryPrompt, selectScoutTurnPolicy, selectTurnPolicy } from "./turn-policy.mjs";
+import { finalizeWorktreeIsolation, prepareWorktreeIsolation } from "./worktree-isolation.mjs";
+import { loadCheckpoint, saveCheckpoint, writeRouteDecision } from "./audit-artifacts.mjs";
 
 const execFileAsync = promisify(execFile);
 const serverDir = dirname(fileURLToPath(import.meta.url));
@@ -405,6 +407,7 @@ export function previewProjectTask(args = {}) {
     approval: mode === "inspect" ? "auto" : "yolo",
     run_gate: mode === "implement" && args.run_gate !== false,
     worker_failover: args.worker_failover !== false,
+    worktree_isolation: mode === "implement" && args.worktree_isolation !== false,
     max_minutes: Number(args.max_minutes) || (mode === "inspect" ? 5 : 8),
   };
 }
@@ -442,8 +445,9 @@ export async function runProjectTask(args = {}) {
   }
 
   const taskId = String(args.task_id || `project-${Date.now()}-${randomUUID().slice(0, 8)}`);
+  const resumedCheckpoint = args.resume === true ? await loadCheckpoint(taskId) : null;
   const maxMinutes = Math.max(1, Math.min(15, preview.max_minutes));
-  const initialAttempt = Number(args.attempt) === 2 ? 2 : 1;
+  const initialAttempt = Number(args.attempt) === 2 || Number(resumedCheckpoint?.next_attempt) === 2 ? 2 : 1;
   const finalAttempt = initialAttempt < 2 && (preview.run_gate !== false || preview.worker_failover)
     ? 2
     : initialAttempt;
@@ -459,6 +463,19 @@ export async function runProjectTask(args = {}) {
   const gateTimeoutMs = Math.max(1, deadline.gate_timeout_seconds) * 1000;
   const allowedJson = JSON.stringify(allowedPaths);
   const gitBaseline = await ensureGitBaseline(cwd, preview.mode);
+  let isolation = preview.mode === "implement"
+    ? await prepareWorktreeIsolation({ cwd, taskId, enabled: preview.worktree_isolation, existing: resumedCheckpoint?.isolation })
+    : { enabled: false, status: "not_needed", original_cwd: cwd, working_cwd: cwd };
+  const workerCwd = isolation.working_cwd || cwd;
+  const routeDecisionPath = await writeRouteDecision(taskId, {
+    kind: "project", mode: preview.mode, budget: preview.budget,
+    selected: { provider: preview.worker, id: preview.worker }, planner: preview.planner,
+    complexity: preview.complexity, isolation,
+  });
+  const checkpointPath = await saveCheckpoint(taskId, {
+    phase: "routed", status: resumedCheckpoint ? "resumed" : "running",
+    next_attempt: initialAttempt, changed_files: resumedCheckpoint?.changed_files || [], isolation,
+  });
   let plannerResult = null;
   let workerResult;
   let gate = null;
@@ -595,7 +612,7 @@ export async function runProjectTask(args = {}) {
       const workerArgs = [
         "-Worker", currentRoute.worker,
         "-Task", workerTask,
-        "-Cwd", cwd,
+        "-Cwd", workerCwd,
         "-TaskId", taskId,
         "-Attempt", String(attempt),
         "-Approval", preview.approval,
@@ -649,7 +666,7 @@ export async function runProjectTask(args = {}) {
 
       if (gateScript) {
         const gateArgs = [
-          "-Cwd", cwd,
+          "-Cwd", workerCwd,
           "-TaskId", taskId,
           "-Task", String(args.task),
           "-Attempt", String(attempt),
@@ -674,6 +691,12 @@ export async function runProjectTask(args = {}) {
         failure_kind: workerFailure.kind,
         turn_policy: turnPolicy,
       });
+      await saveCheckpoint(taskId, {
+        phase: "attempt_complete",
+        status: gate?.decision || workerResult.status,
+        next_attempt: attempt < finalAttempt ? attempt + 1 : attempt,
+        changed_files: [...changedFileSet], isolation, last_gate: gate,
+      });
       if (!shouldRunTargetedRetry(gate, attempt, finalAttempt)) break;
       retryTask = buildTargetedRetryTask(gate, workerResult);
     }
@@ -689,6 +712,25 @@ export async function runProjectTask(args = {}) {
   const finalSummary = attempts.length > 1
     ? `Completed ${attempts.length} worker attempts. Final attempt:\n${workerResult.summary || "No summary."}`
     : workerResult.summary;
+
+  if (preview.mode === "implement" && isolation.enabled) {
+    const accepted = gate?.decision === "accept";
+    isolation = await finalizeWorktreeIsolation(isolation, { accepted });
+    if (accepted && isolation.status !== "applied") {
+      gate = {
+        ...(gate || {}),
+        decision: "takeover",
+        score: Math.min(Number(gate?.score || 0), 70),
+        reason: "The isolated worktree passed validation but could not be safely applied to the original workspace.",
+        hard_failures: [...new Set([...(gate?.hard_failures || []), `worktree isolation ${isolation.status}`])],
+        codex_takeover: { required: true, instruction: "Inspect the retained isolated worktree and original workspace before applying changes." },
+      };
+    }
+  }
+  await saveCheckpoint(taskId, {
+    phase: "complete", status: gate?.decision || workerResult.status,
+    next_attempt: finalAttempt, changed_files: [...changedFileSet], isolation, last_gate: gate,
+  });
 
   return {
     schema_version: "1.0",
@@ -721,6 +763,8 @@ export async function runProjectTask(args = {}) {
     budget: preview.budget,
     deadline,
     git_baseline: gitBaseline,
+    isolation,
+    resumed: Boolean(resumedCheckpoint),
     status: gate?.decision || workerResult.status,
     worker_status: workerResult.status,
     model: combinedModels || workerResult.model,
@@ -752,6 +796,8 @@ export async function runProjectTask(args = {}) {
       team_runs: combinedWorkerRuns,
       gate_report: gate?.artifacts?.gate_report || null,
       handoff: gate?.artifacts?.handoff || null,
+      route_decision: routeDecisionPath,
+      checkpoint: checkpointPath,
     },
   };
 }

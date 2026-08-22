@@ -11,6 +11,7 @@ import { previewProjectTask, runProjectTask } from "./project-task.mjs";
 import { planTaskTeam } from "./team-planner.mjs";
 import { recordUsage, usageEvent, usageSummary } from "./usage-ledger.mjs";
 import { xaiSearchClient } from "./xai-search.mjs";
+import { writeRouteDecision } from "./audit-artifacts.mjs";
 import { createBudgetRouter } from "./budget-router.mjs";
 import { isNetworkRequestError, resilientFetch } from "./network-client.mjs";
 import { runDoctor } from "./doctor.mjs";
@@ -157,6 +158,7 @@ function budgetRouterMetadata() {
 }
 
 const budgetRouter = createBudgetRouter({
+  healthPersistence: true,
   allowOpenRouterFreeFallback: process.env.AI_TEAM_OPENROUTER_FREE_FALLBACK === "true",
   modelMetadata: budgetRouterMetadata(),
 });
@@ -627,6 +629,8 @@ const tools = [
         attempt: { type: "integer", minimum: 1, maximum: 2 },
         run_gate: { type: "boolean" },
         worker_failover: { type: "boolean" },
+        worktree_isolation: { type: "boolean", description: "Run implementation in a temporary detached Git worktree when the original repository is clean. Defaults to true." },
+        resume: { type: "boolean", description: "Resume a retained isolated workspace/checkpoint for the same task_id after interruption." },
         dry_run: { type: "boolean" },
       },
       required: ["task", "cwd"],
@@ -668,6 +672,7 @@ const tools = [
         budget: { type: "string", enum: ["low", "normal", "deep"] },
         max_minutes: { type: "integer", minimum: 1, maximum: 15 },
         worker_failover: { type: "boolean" },
+        worktree_isolation: { type: "boolean", description: "Run implementation in a temporary detached Git worktree when the original repository is clean. Defaults to true; unsafe apply conditions retain the worktree for Codex takeover." },
         dry_run: { type: "boolean" },
       },
       required: ["cwd", "items"],
@@ -785,6 +790,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       messages,
       max_tokens: maxTokens,
       dry_run: dryRun,
+    });
+    outcome.route_decision_path = await writeRouteDecision(`budget-${Date.now()}`, {
+      kind: "budget", mode, budget: dryRun ? "dry_run" : "live",
+      selected: outcome.explanation?.selected,
+      candidates: outcome.explanation?.candidates,
+      excluded: outcome.explanation?.excluded,
+      fallback_chain: outcome.explanation?.fallback_chain,
     });
 
     return result(JSON.stringify(outcome, null, 2));

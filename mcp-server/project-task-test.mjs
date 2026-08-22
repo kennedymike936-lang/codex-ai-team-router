@@ -3,6 +3,8 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+await import("./worktree-isolation-test.mjs");
+await import("./audit-artifacts-test.mjs");
 import {
   buildTargetedRetryTask,
   buildWorkerFailoverTask,

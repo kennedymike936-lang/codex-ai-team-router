@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   adapterForProvider,
   geminiContentsFromMessages,
@@ -16,6 +19,42 @@ import {
   redactKeys,
 } from "./provider-adapters.mjs";
 import { createBudgetRouter, scoreCandidate } from "./budget-router.mjs";
+import { ProviderHealthTracker, modelKey, parseRetryAfter } from "./provider-health.mjs";
+
+{
+  const dir = mkdtempSync(join(tmpdir(), "ai-team-health-"));
+  try {
+    const now = Date.parse("2026-08-21T00:00:00Z");
+    assert.equal(parseRetryAfter("8", now), now + 8000);
+    assert.equal(parseRetryAfter(new Date(now + 9000).toUTCString(), now), now + 9000);
+    const tracker = new ProviderHealthTracker({ stateDir: dir });
+    tracker.load(now);
+    tracker.recordFailure("openrouter", "vendor/model:v2", 429, "8", now);
+    tracker.save();
+    const reloaded = new ProviderHealthTracker({ stateDir: dir });
+    reloaded.load(now + 1000);
+    const key = modelKey("openrouter", "vendor/model:v2");
+    assert.equal(reloaded.getCooldownRemainingMs(key, now + 1000), 7000);
+    assert.equal(reloaded.filterActiveCooldown([{ provider: "openrouter", id: "vendor/model:v2" }], now + 1000).excluded_with_reason[0].reason, "provider_cooldown");
+    assert.equal(reloaded.filterActiveCooldown([{ provider: "openrouter", id: "vendor/model:v2" }], now + 9000).included.length, 1);
+    reloaded.recordSuccess("openrouter", "vendor/model:v2", { remaining_requests: 10 }, now + 10000);
+    reloaded.save();
+    assert.equal(reloaded.getCooldownRemainingMs(key, now + 10000), 0);
+    const persisted = readFileSync(join(dir, "providers.json"), "utf8");
+    assert.equal(persisted.includes("secret-token"), false);
+    assert.equal(persisted.includes("vendor/model:v2"), true);
+    writeFileSync(join(dir, "providers.json"), JSON.stringify({ version: 1, entries: [{ provider: "xai", model_id: "old", cooldown_end_ms: now, failure_count: 1, updated_at: now - 8 * 86400000 }] }));
+    const pruned = new ProviderHealthTracker({ stateDir: dir });
+    pruned.load(now);
+    assert.equal(pruned.getEntry(modelKey("xai", "old")), null);
+    assert.equal(pruned.shouldRecordCooldown(401, false), false);
+    assert.equal(pruned.shouldRecordCooldown(429, false), true);
+    assert.equal(pruned.shouldRecordCooldown(null, true), true);
+    console.log("Provider health: persistence, cooldown, expiry, status classification, and redaction passed");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
 
 const OPENROUTER_TEST_CREDENTIAL = "openrouter-test-value";
 const GROQ_TEST_CREDENTIAL = "groq-test-value";
