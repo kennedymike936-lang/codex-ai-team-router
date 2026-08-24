@@ -1,3 +1,5 @@
+import { resilientFetch } from "./network-client.mjs";
+
 const DEFAULT_TTL_MS = 60 * 60 * 1000;
 
 export const MODEL_CATALOG = {
@@ -90,7 +92,7 @@ export function estimateCostCny(provider, model, usage = {}) {
 }
 
 export class ModelSelector {
-  constructor({ fetchImpl = fetch, ttlMs = DEFAULT_TTL_MS, now = () => Date.now() } = {}) {
+  constructor({ fetchImpl = resilientFetch, ttlMs = DEFAULT_TTL_MS, now = () => Date.now() } = {}) {
     this.fetchImpl = fetchImpl;
     this.ttlMs = ttlMs;
     this.now = now;

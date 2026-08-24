@@ -1,4 +1,4 @@
-const LIVE_RESEARCH_WORDS = /\b(latest|current|today|recent|news|price|pricing|version|release|announcement|official docs?|web search|x\.com|twitter|social sentiment)\b|最新|当前|今天|近期|新闻|价格|版本|发布|公告|官方文档|联网搜索|实时|推特|舆情/i;
+const LIVE_RESEARCH_WORDS = /\b(latest|current|today|recent|news|price|pricing|announcement|official docs?|web search|x\.com|twitter|social sentiment)\b|最新|当前|今天|近期|新闻|价格|公告|官方文档|联网搜索|实时|推特|舆情/i;
 const ARCHITECTURE_WORDS = /\b(architecture|architect|migration|migrate|cross[- ]module|multi[- ]module|distributed|platform|framework|redesign|rewrite)\b|架构|迁移|跨模块|多模块|分布式|平台|框架|重写|重新设计/i;
 const END_TO_END_WORDS = /\b(end[- ]to[- ]end|full[- ]stack|entire (app|project|system)|from scratch|production[- ]ready|complete (app|project|system))\b|端到端|全栈|整个项目|完整项目|从零开始|生产可用/i;
 const RISK_WORDS = /\b(security|auth|payment|billing|database|data migration|concurrency|performance|privacy|deployment|infrastructure)\b|安全|认证|支付|计费|数据库|数据迁移|并发|性能|隐私|部署|基础设施/i;

@@ -1,0 +1,558 @@
+import { adapterForProvider, redactKeys } from "./provider-adapters.mjs";
+import { ProviderHealthTracker } from "./provider-health.mjs";
+import { ProviderRuntimePool } from "./provider-runtime.mjs";
+
+export const ROUTING_MODES = ["free_only", "balanced", "quality_first"];
+const KNOWN_CAPABILITIES = new Set(["code", "tools", "web"]);
+
+function round(value) {
+  return Number(Number(value || 0).toFixed(4));
+}
+
+function modelKey(model) {
+  return `${model.provider}:${model.id}`;
+}
+
+function capabilitiesFor(model) {
+  return Array.isArray(model.capabilities)
+    ? [...new Set(model.capabilities.map((item) => String(item).toLowerCase()))].sort()
+    : [];
+}
+
+function normalizedRequirements(requirements = {}) {
+  const capabilities = [...new Set((requirements.capabilities || []).map((item) => String(item).toLowerCase()))];
+  const unknown = capabilities.filter((item) => !KNOWN_CAPABILITIES.has(item));
+  if (unknown.length > 0) throw new Error(`Unknown capabilities: ${unknown.join(", ")}`);
+  return {
+    capabilities,
+    min_context_length: Math.max(0, Number(requirements.min_context_length || 0)),
+    sensitive: requirements.sensitive === true,
+    policy_sensitive: requirements.policy_sensitive === true,
+    require_zero_data_retention: requirements.require_zero_data_retention === true,
+  };
+}
+
+export function meetsRequirements(model, requirements = {}) {
+  const normalized = normalizedRequirements(requirements);
+  const reasons = [];
+  const capabilities = capabilitiesFor(model);
+  for (const capability of normalized.capabilities) {
+    if (!capabilities.includes(capability)) reasons.push(`missing_capability:${capability}`);
+  }
+  if (normalized.min_context_length > 0 && Number(model.context_length || 0) < normalized.min_context_length) {
+    reasons.push(`context_too_short:${Number(model.context_length || 0)}<${normalized.min_context_length}`);
+  }
+  if (normalized.sensitive && model.privacy_sensitive_task_policy === "deny") {
+    reasons.push("provider_policy:privacy_sensitive_tasks_disabled");
+  } else if ((normalized.sensitive || normalized.require_zero_data_retention) && model.is_zero_data_retention !== true) {
+    reasons.push("privacy:zero_data_retention_not_explicitly_confirmed");
+  }
+  if (normalized.policy_sensitive && model.content_policy === "restricted") {
+    reasons.push("provider_policy:policy_sensitive_topics_disabled");
+  }
+  return { passed: reasons.length === 0, reasons, requirements: normalized };
+}
+
+function costComponent(model, mode) {
+  const input = model.pricing?.input;
+  const output = model.pricing?.output;
+  const known = Number.isFinite(input) && Number.isFinite(output);
+  if (!known) return mode === "balanced" ? -5 : 0;
+  if (input === 0 && output === 0) return mode === "balanced" ? 30 : 8;
+  const perMillionMaximum = Math.max(input, output) * 1_000_000;
+  const value = Math.max(-5, 15 - Math.log10(perMillionMaximum + 1) * 4);
+  return mode === "balanced" ? value : Math.min(3, value / 5);
+}
+
+export function scoreCandidate(model, mode, requirements = {}, runtimeState = {}) {
+  const capabilities = capabilitiesFor(model);
+  const quality = Number.isFinite(model.quality_score) ? Math.min(model.quality_score, 1) * 30 : 0;
+  const context = model.context_length > 0 ? Math.min(10, Math.log2(model.context_length) / 2) : 0;
+  const capability = capabilities.length * (mode === "quality_first" ? 5 : 2);
+  const cost = mode === "free_only" ? 0 : costComponent(model, mode);
+  const latency = Number.isFinite(model.latency_ms) ? Math.max(-5, 10 - model.latency_ms / 200) : 0;
+  const state = runtimeState[modelKey(model)] || {};
+  const healthName = String(state.health || model.health || "unknown").toLowerCase();
+  let health = healthName === "healthy" ? 5 : healthName === "degraded" ? -20 : healthName === "unhealthy" ? -40 : 0;
+  const remaining = state.remaining_requests ?? model.quota_remaining;
+  if (remaining === 0) health -= 30;
+  else if (Number.isFinite(remaining) && remaining > 0) health += Math.min(5, Math.log10(remaining + 1));
+  const privacy = model.is_zero_data_retention === true ? 3 : 0;
+  const required = normalizedRequirements(requirements);
+  const requirementMatch = required.capabilities.filter((item) => capabilities.includes(item)).length * 3;
+  const preference = Number.isFinite(model.routing_priority)
+    ? Math.max(-25, Math.min(25, Number(model.routing_priority)))
+    : 0;
+  const components = {
+    preference: round(preference),
+    quality: round(quality),
+    capability: round(capability + requirementMatch),
+    context: round(context),
+    cost: round(cost),
+    latency: round(latency),
+    health: round(health),
+    privacy: round(privacy),
+  };
+  const total = round(Object.values(components).reduce((sum, value) => sum + value, 0));
+  return { total, components };
+}
+
+function candidateSummary(model, score = null) {
+  return {
+    id: model.id,
+    provider: model.provider,
+    capabilities: capabilitiesFor(model),
+    context_length: Number(model.context_length || 0),
+    pricing: {
+      input: Number.isFinite(model.pricing?.input) ? model.pricing.input : null,
+      output: Number.isFinite(model.pricing?.output) ? model.pricing.output : null,
+    },
+    is_free: model.is_free === true,
+    is_zero_data_retention: model.is_zero_data_retention === true,
+    ...(model.privacy_sensitive_task_policy ? { privacy_sensitive_task_policy: model.privacy_sensitive_task_policy } : {}),
+    ...(model.content_policy ? { content_policy: model.content_policy } : {}),
+    ...(model.data_boundary ? { data_boundary: model.data_boundary } : {}),
+    health: model.health || "unknown",
+    latency_ms: Number.isFinite(model.latency_ms) ? model.latency_ms : null,
+    quota_remaining: Number.isFinite(model.quota_remaining) ? model.quota_remaining : null,
+    ...(Number.isFinite(model.routing_priority) ? { routing_priority: model.routing_priority } : {}),
+    ...(Number.isFinite(model.daily_request_limit) ? { daily_request_limit: model.daily_request_limit } : {}),
+    ...(Number.isFinite(model.daily_requests_used) ? { daily_requests_used: model.daily_requests_used } : {}),
+    ...(Number.isFinite(model.daily_request_reset_at) ? { daily_request_reset_at: model.daily_request_reset_at } : {}),
+    ...(score ? { score: score.total, score_components: score.components } : {}),
+  };
+}
+
+function buildFallbackChain(candidates, mode, requirements, runtimeState) {
+  const eligible = [];
+  const excluded = [];
+  for (const model of candidates) {
+    const check = meetsRequirements(model, requirements);
+    const knownZeroPrice = model.pricing?.input === 0 && model.pricing?.output === 0;
+    if (mode === "free_only" && (!knownZeroPrice || model.is_free !== true)) {
+      check.reasons.push("not_confirmed_zero_price");
+    }
+    if (Number.isFinite(model.quota_remaining) && model.quota_remaining === 0) {
+      check.reasons.push(Number.isFinite(model.daily_request_limit)
+        ? "daily_request_limit_exhausted"
+        : "provider_quota_exhausted");
+    }
+    if (check.reasons.length > 0) {
+      excluded.push({ ...candidateSummary(model), reasons: [...new Set(check.reasons)] });
+      continue;
+    }
+    eligible.push({ model, score: scoreCandidate(model, mode, requirements, runtimeState) });
+  }
+  eligible.sort((a, b) =>
+    b.score.total - a.score.total ||
+    String(a.model.provider).localeCompare(String(b.model.provider)) ||
+    String(a.model.id).localeCompare(String(b.model.id))
+  );
+  return { eligible, excluded };
+}
+
+function freeRouterCandidate() {
+  return {
+    id: "openrouter/free",
+    provider: "openrouter",
+    capabilities: [],
+    context_length: 0,
+    pricing: { input: 0, output: 0 },
+    is_free: true,
+    is_zero_data_retention: false,
+    health: "unknown",
+    latency_ms: null,
+    quota_remaining: null,
+  };
+}
+
+function mergeMetadata(model, overrides = {}) {
+  const override = overrides[`${model.provider}:${model.id}`] || overrides[model.id] || {};
+  if (Object.keys(override).length === 0) return model;
+  const merged = {
+    ...model,
+    ...override,
+    capabilities: [...new Set([...(model.capabilities || []), ...(override.capabilities || [])])],
+    pricing: { ...(model.pricing || {}), ...(override.pricing || {}) },
+  };
+  if (model.privacy_sensitive_task_policy === "deny") merged.privacy_sensitive_task_policy = "deny";
+  if (model.content_policy === "restricted") merged.content_policy = "restricted";
+  return merged;
+}
+
+export function createBudgetRouter({
+  allowOpenRouterFreeFallback = false,
+  modelMetadata = {},
+  capabilityCatalog = {},
+  now = () => Date.now(),
+  healthTracker: providedTracker,
+  runtimePool: providedRuntimePool,
+  runtimeOptions = {},
+  stateStore = null,
+  modelDiscoveryTtlMs = 60 * 60 * 1_000,
+  retryBaseDelayMs = 250,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  stateDir,
+  healthPersistence = false,
+} = {}) {
+  const runtimeState = {};
+  const modelDiscoveryCache = new Map();
+  // Lazily-created health tracker (persistent cooldown / failure state)
+  let _tracker;
+  function getTracker() {
+    if (!_tracker) {
+      // Build per-provider adapter gateways; default covers all providers
+      const tracker = new ProviderHealthTracker({ stateDir, persistent: healthPersistence });
+      tracker.isAuthOrPermissionStop = (s) => s === 401 || s === 403;
+      tracker.isSafeFallbackStatus = (s) => [402, 429, 498].includes(s) || (s >= 500 && s <= 599);
+      _tracker = tracker;
+    }
+    return _tracker;
+  }
+  const tracker = providedTracker || getTracker();
+  const providerRuntimePool = providedRuntimePool || new ProviderRuntimePool({
+    defaults: runtimeOptions,
+    stateStore,
+    now,
+  });
+  // Lazy-load persisted state on first access
+  function ensureLoaded() {
+    tracker.load(now());
+  }
+
+  function persistHealth() {
+    try { tracker.save(); } catch {}
+  }
+
+  function configuredPoolIds(provider) {
+    const prefix = `${provider}:`;
+    return new Set(Object.entries(modelMetadata)
+      .filter(([key, value]) => key.startsWith(prefix) && value?.pool_member === true)
+      .map(([key]) => key.slice(prefix.length)));
+  }
+
+  function applyConfiguredPool(provider, models) {
+    const ids = configuredPoolIds(provider);
+    return ids.size > 0 ? models.filter((model) => ids.has(model.id)) : models;
+  }
+
+  async function applyDailyRequestLimits(models) {
+    if (!stateStore?.countRequests) return models;
+    const current = now();
+    const dayStart = Math.floor(current / 86_400_000) * 86_400_000;
+    const resetAt = dayStart + 86_400_000;
+    return Promise.all(models.map(async (model) => {
+      const limit = Number(model.daily_request_limit);
+      if (!Number.isFinite(limit) || limit <= 0) return model;
+      let used = 0;
+      try {
+        used = await stateStore.countRequests({ provider: model.provider, model: model.id, since: dayStart });
+      } catch {}
+      const localRemaining = Math.max(0, Math.trunc(limit) - Math.max(0, Number(used) || 0));
+      const providerRemaining = Number.isFinite(model.quota_remaining) ? model.quota_remaining : null;
+      return {
+        ...model,
+        quota_remaining: providerRemaining === null ? localRemaining : Math.min(providerRemaining, localRemaining),
+        daily_request_limit: Math.trunc(limit),
+        daily_requests_used: Math.max(0, Number(used) || 0),
+        daily_request_reset_at: resetAt,
+      };
+    }));
+  }
+
+  function updateRuntimeState(model, status, headers = {}) {
+    const key = modelKey(model);
+    runtimeState[key] = {
+      health: status === "success" ? "healthy" : "degraded",
+      remaining_requests: Number.isFinite(headers.remaining_requests) ? headers.remaining_requests : null,
+      remaining_tokens: Number.isFinite(headers.remaining_tokens) ? headers.remaining_tokens : null,
+      retry_after: headers.retry_after || null,
+      updated_at: now(),
+    };
+    return runtimeState[key];
+  }
+
+  return {
+    runtimeState,
+    modelDiscoveryCache,
+    providerRuntimePool,
+    allowOpenRouterFreeFallback,
+
+    async discoverCandidates({ providers = [], apiKeys = {}, baseUrls = {}, fetchImpl, candidates }) {
+      if (Array.isArray(candidates) && candidates.length > 0) {
+        return { candidates: candidates.map((model) => mergeMetadata(model, modelMetadata)), provider_exclusions: [] };
+      }
+      const discovered = [];
+      const providerExclusions = [];
+      for (const provider of [...new Set(providers)]) {
+        let adapter;
+        try {
+          adapter = adapterForProvider(provider, fetchImpl);
+        } catch (error) {
+          providerExclusions.push({ provider, reason: redactKeys(error.message || String(error), Object.values(apiKeys)) });
+          continue;
+        }
+        const credential = apiKeys[provider];
+        if (adapter.requiresApiKey !== false && !credential) {
+          providerExclusions.push({ provider, reason: "api_key_not_configured" });
+          continue;
+        }
+        const cacheKey = `${provider}:${String(baseUrls[provider] || "default")}`;
+        const cached = modelDiscoveryCache.get(cacheKey);
+        if (cached && cached.expires_at > now()) {
+          discovered.push(...applyConfiguredPool(provider, cached.models.map((model) => mergeMetadata(model, modelMetadata))));
+          continue;
+        }
+        try {
+          const models = await adapter.discoverModels({
+            apiKey: credential,
+            baseUrl: baseUrls[provider],
+            metadata: modelMetadata,
+            capabilityCatalog,
+          });
+          modelDiscoveryCache.set(cacheKey, {
+            models,
+            discovered_at: now(),
+            expires_at: now() + Math.max(1_000, Number(modelDiscoveryTtlMs) || 3_600_000),
+          });
+          discovered.push(...applyConfiguredPool(provider, models.map((model) => mergeMetadata(model, modelMetadata))));
+        } catch (error) {
+          if (cached?.models?.length) {
+            discovered.push(...applyConfiguredPool(provider, cached.models.map((model) => mergeMetadata(model, modelMetadata))));
+            providerExclusions.push({ provider, reason: "model_discovery_failed_using_stale_cache" });
+          } else {
+            providerExclusions.push({ provider, reason: redactKeys(error.message || String(error), Object.values(apiKeys)) });
+          }
+        }
+      }
+      return { candidates: discovered, provider_exclusions: providerExclusions };
+    },
+
+    route({ candidates = [], mode = "balanced", requirements = {}, provider_exclusions = [] }) {
+      if (!ROUTING_MODES.includes(mode)) {
+        throw new Error(`Invalid mode: ${mode}. Must be one of: ${ROUTING_MODES.join(", ")}`);
+      }
+      ensureLoaded();
+      // Exclude providers currently in cooldown from persistence tracker
+      const cooldownFilter = tracker.filterActiveCooldown(candidates, now());
+      const cooldownExcluded = cooldownFilter.excluded_with_reason.map((item) => ({
+        id: item.id,
+        provider: item.provider,
+        reason: "provider_cooldown",
+        remaining_ms: item.remaining_ms,
+      }));
+      const normalized = normalizedRequirements(requirements);
+      const { eligible, excluded } = buildFallbackChain(cooldownFilter.included, mode, normalized, runtimeState);
+      const fallback = eligible.map(({ model, score }) => candidateSummary(model, score));
+      return {
+        mode,
+        requirements: normalized,
+        candidates: candidates.map((model) => candidateSummary(model)),
+        provider_exclusions,
+        excluded: [...cooldownExcluded, ...excluded],
+        selected: fallback[0] || null,
+        fallback_chain: fallback,
+      };
+    },
+
+    async execute({
+      candidates,
+      mode = "balanced",
+      requirements = {},
+      providers = [],
+      apiKeys = {},
+      baseUrls = {},
+      fetchImpl,
+      messages,
+      max_tokens = 1024,
+      temperature = 0.2,
+      thinking = "auto",
+      dry_run = true,
+    }) {
+      const discovery = await this.discoverCandidates({ providers, apiKeys, baseUrls, fetchImpl, candidates });
+      const pool = [...discovery.candidates];
+      if (
+        this.allowOpenRouterFreeFallback &&
+        mode === "free_only" &&
+        apiKeys.openrouter &&
+        configuredPoolIds("openrouter").size === 0 &&
+        !pool.some((model) => model.provider === "openrouter" && model.id === "openrouter/free")
+      ) {
+        pool.push(mergeMetadata(freeRouterCandidate(), modelMetadata));
+      }
+      const quotaAwarePool = await applyDailyRequestLimits(pool);
+      const explanation = this.route({
+        candidates: quotaAwarePool,
+        mode,
+        requirements,
+        provider_exclusions: discovery.provider_exclusions,
+      });
+      if (dry_run) return { dry_run: true, explanation };
+      if (explanation.fallback_chain.length === 0) {
+        return { dry_run: false, explanation, result: null, attempts: [], error: "No eligible model found." };
+      }
+
+      const attempts = [];
+      for (const entry of explanation.fallback_chain) {
+        const credential = apiKeys[entry.provider];
+        const adapter = adapterForProvider(entry.provider, fetchImpl);
+        if (adapter.requiresApiKey !== false && !credential) {
+          attempts.push({ model: entry.id, provider: entry.provider, success: false, stopped: true, error: "API key is not configured." });
+          return { dry_run: false, explanation, result: null, attempts, error: `API key is not configured for ${entry.provider}.` };
+        }
+        let response;
+        let body;
+        let headers;
+        let deliveryAttempts = 0;
+        try {
+          while (true) {
+            deliveryAttempts += 1;
+            ({ response } = await providerRuntimePool.run(entry.provider, async ({ signal }) => {
+              if (stateStore?.recordRequest) {
+                await stateStore.recordRequest({
+                  provider: entry.provider,
+                  model: entry.id,
+                  status: 0,
+                  created_at: now(),
+                });
+              }
+              return adapter.chatCompletion({
+                apiKey: credential,
+                baseUrl: baseUrls[entry.provider],
+                messages,
+                model: entry.id,
+                max_tokens,
+                temperature,
+                thinking,
+                signal,
+              });
+            }));
+            body = await response.text();
+            headers = adapter.parseHealthFromHeaders(response.headers);
+            const status = Number(response.status);
+            if (!response.ok && status >= 500 && status <= 599 && deliveryAttempts === 1) {
+              providerRuntimePool.reportFailure(entry.provider, status);
+              const jitter = Math.floor(Math.random() * Math.max(1, retryBaseDelayMs));
+              await sleep(Math.max(0, retryBaseDelayMs + jitter));
+              continue;
+            }
+            break;
+          }
+        } catch (error) {
+          const safeError = redactKeys(error.message || String(error), Object.values(apiKeys));
+          if (["PROVIDER_CIRCUIT_OPEN", "PROVIDER_QUEUE_FULL", "PROVIDER_TIMEOUT"].includes(error?.code)) {
+            if (error.code === "PROVIDER_TIMEOUT") providerRuntimePool.reportFailure(entry.provider, 503);
+            attempts.push({
+              model: entry.id,
+              provider: entry.provider,
+              success: false,
+              stopped: false,
+              failure_kind: error.code.toLowerCase(),
+              error: safeError,
+            });
+            continue;
+          }
+          const preconnect = error?.diagnostic?.preconnect === true;
+          if (tracker.shouldRecordCooldown(null, preconnect)) {
+            tracker.recordFailure(entry.provider, entry.id, null, null, now());
+            persistHealth();
+            attempts.push({ model: entry.id, provider: entry.provider, success: false, stopped: false, failure_kind: "preconnect_network", error: safeError });
+            continue;
+          }
+          attempts.push({ model: entry.id, provider: entry.provider, success: false, stopped: true, failure_kind: "network_delivery_uncertain", error: safeError });
+          return { dry_run: false, explanation, result: null, attempts, error: safeError };
+        }
+
+        if (!response.ok) {
+          const status = Number(response.status);
+          const error = redactKeys(`HTTP ${status}: ${body.slice(0, 300)}`, Object.values(apiKeys));
+          if (adapter.isSafeFallbackStatus(status)) {
+            providerRuntimePool.reportFailure(entry.provider, status);
+            const health = updateRuntimeState(entry, "fallback", headers);
+            tracker.recordFailure(entry.provider, entry.id, status, headers.retry_after, now());
+            persistHealth();
+            attempts.push({
+              model: entry.id,
+              provider: entry.provider,
+              success: false,
+              status,
+              delivery_attempts: deliveryAttempts,
+              retry_after: headers.retry_after || null,
+              health,
+              error,
+            });
+            continue;
+          }
+          attempts.push({ model: entry.id, provider: entry.provider, success: false, stopped: true, status, error });
+          return { dry_run: false, explanation, result: null, attempts, error };
+        }
+
+        let json;
+        try {
+          json = JSON.parse(body);
+        } catch {
+          const error = "Provider returned a non-JSON success response; routing stopped.";
+          attempts.push({ model: entry.id, provider: entry.provider, success: false, stopped: true, status: 200, error });
+          return { dry_run: false, explanation, result: null, attempts, error };
+        }
+        const health = updateRuntimeState(entry, "success", headers);
+        providerRuntimePool.reportSuccess(entry.provider);
+        tracker.recordSuccess(entry.provider, entry.id, headers, now());
+        persistHealth();
+        const normalized = adapter.parseResponse(json);
+        if (stateStore?.recordUsage) {
+          void stateStore.recordUsage({
+            provider: entry.provider,
+            model: entry.id,
+            input_tokens: normalized.usage.input_tokens,
+            output_tokens: normalized.usage.output_tokens,
+            status: 200,
+            created_at: now(),
+          }).catch(() => {});
+        }
+        const hasUsableOutput =
+          (typeof normalized.content === "string" && normalized.content.trim().length > 0) ||
+          (Array.isArray(normalized.tool_calls) && normalized.tool_calls.length > 0);
+        if (!hasUsableOutput) {
+          attempts.push({
+            model: entry.id,
+            provider: entry.provider,
+            success: false,
+            stopped: false,
+            status: 200,
+            delivery_attempts: deliveryAttempts,
+            failure_kind: "empty_output",
+            finish_reason: normalized.finish_reason,
+            usage: normalized.usage,
+            health,
+          });
+          continue;
+        }
+        attempts.push({ model: entry.id, provider: entry.provider, success: true, status: 200, delivery_attempts: deliveryAttempts, health });
+        return {
+          dry_run: false,
+          explanation,
+          result: {
+            provider: entry.provider,
+            model: entry.id,
+            protocol: adapter.protocol,
+            content: normalized.content,
+            tool_calls: normalized.tool_calls,
+            finish_reason: normalized.finish_reason,
+            usage: normalized.usage,
+          },
+          attempts,
+        };
+      }
+      return {
+        dry_run: false,
+        explanation,
+        result: null,
+        attempts,
+        error: redactKeys("All eligible models were exhausted by retryable provider or output-validation failures.", Object.values(apiKeys)),
+      };
+    },
+  };
+}
+
+export const defaultBudgetRouter = createBudgetRouter({ healthPersistence: true });

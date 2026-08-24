@@ -17,7 +17,7 @@ if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
 
 if (-not [string]::IsNullOrWhiteSpace($DeployRoot)) {
   $DeployRoot = [System.IO.Path]::GetFullPath($DeployRoot)
-  $serverDir = Join-Path $DeployRoot "ai-team-mcp-server"
+  $serverDir = Join-Path $DeployRoot "ai-cluster-mcp-server"
   $scriptDir = Join-Path $DeployRoot "scripts"
   New-Item -ItemType Directory -Force -Path $serverDir, $scriptDir | Out-Null
 

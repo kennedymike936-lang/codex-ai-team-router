@@ -1,149 +1,113 @@
-# Codex AI Team Router
+# Codex AI Cluster
 
-[English](README.en.md) | 简体中文
+**GLM-first, free-tier-aware multi-provider inference for Codex — with an optional bounded AI Team execution plane.**
 
-让 Codex 做项目经理和最终审稿人，把文档与初步分析交给 Qwen、代码杂活交给 DeepSeek，把实时 Web / X 信息侦查交给 Grok Search。
+[![Version](https://img.shields.io/badge/version-1.0.0-00d8ff)](https://github.com/kennedymike936-lang/codex-ai-team-router/releases/tag/v1.0.0)
+[![License: MIT](https://img.shields.io/badge/license-MIT-8cff72)](LICENSE)
+[![Node.js 20+](https://img.shields.io/badge/node-%3E%3D20-7ccf6b)](mcp-server/package.json)
+[![Platform](https://img.shields.io/badge/workers-Windows%20PowerShell-4f8cff)](scripts/)
 
-项目通过一个轻量 MCP Router 自动选择副手，并用本地 PowerShell 脚本完成项目侦查、受控执行和验收报告。完整过程保存在磁盘中，Codex 只接收紧凑摘要，避免命令输出和长日志持续撑大主对话上下文。
+Codex AI Cluster is a local MCP control plane that discovers, ranks, calls, and fails over across multiple model providers while keeping Codex in command. Its default policy prefers **Zhipu GLM-4.7-Flash**, then consumes verified free pools and account-specific allowances before any paid route is considered.
 
-> 目标不是追求最低 token，而是以合理成本稳定交付 90～95 分的结果；低于质量底线时，Codex 立即接管。
+Version 1.0 is a major architectural boundary. The old “AI Team Router” has become two explicit layers:
 
-## 工作模式
+- **AI Cluster** is the inference control plane: model discovery, capability routing, quotas, health, circuit breakers, ledgers, and local observability.
+- **AI Team** is an optional execution plane: bounded local project workers, read-only research, single-writer implementation, and deterministic validation.
+
+The GitHub repository keeps its historical URL, but the product, MCP server, package, and deployment identity are now **Codex AI Cluster**.
+
+> Free plans, model catalogs, and provider rate limits can change without notice. The router combines dated built-in metadata with live account discovery; provider dashboards and responses remain the source of truth.
+
+## Why a cluster instead of only a team?
+
+| Concern | AI Cluster control plane | Optional AI Team execution plane |
+|---|---|---|
+| Primary job | Select and operate inference capacity | Perform a bounded local project phase |
+| Unit of routing | Provider, model, capability, quota, health | Scout, planner, worker, reviewer |
+| Local file access | None for `budget_route` | Explicit `cwd` and optional `allowed_paths` |
+| Failure handling | Cooldown, circuit state, safe provider failover | Retry once, deterministic Gate, Codex takeover |
+| Cost policy | GLM-first and free-first | Qwen-first; paid DeepSeek only by explicit opt-in |
+| Observability | Sanitized provider/model events and quota state | Sanitized assignments, challenges, results, and Gate decisions |
+
+This separation lets the same free inference pool serve drafts, comparisons, coding assistance, and future workers without pretending that every model call is a filesystem-capable “agent.”
+
+## Architecture
 
 ```mermaid
 flowchart LR
-    U[用户任务] --> C[Codex\n项目经理 / 架构师]
-    C --> R[AI Team MCP Router]
-    R -->|文档、整理、宽泛初稿| Q[Qwen]
-    R -->|代码、排错、实现思路| D[DeepSeek]
-    R -->|实时 Web / X 信息| X[Grok Search]
-    R -->|明确要求独立双审| B[Qwen + DeepSeek]
-    C --> P[project_task\n整段本地工程委派]
-    P --> S[Scout\n文件与日志侦查]
-    P --> W[Worker\n非交互实现]
-    S --> A[磁盘完整报告 + 紧凑摘要]
-    W --> A
-    A --> C
-    C --> G[Gate\n构建 / 测试 / 类型 / lint / diff / secrets]
-    G --> E{质量决策}
-    E -->|90～100| O[接受并交付]
-    E -->|80～89 / 首次| W
-    E -->|低于 80 / 硬失败 / 已返工| T[Codex 全盘接管]
+    U[User] --> C[Codex<br/>Commander and final reviewer]
+    C --> R[AI Cluster MCP<br/>control plane]
+    R --> P[GLM-4.7-Flash<br/>preferred primary]
+    R --> F[Free fallback fabric<br/>OpenRouter · Cloudflare · Groq<br/>ModelScope · NVIDIA]
+    R --> A[Account-credit routes<br/>Mistral and compatible providers]
+    R --> S[(Local state<br/>quotas · health · ledgers)]
+    R --> M[Mission Control<br/>127.0.0.1 only]
+    C --> T[Optional AI Team<br/>execution plane]
+    T --> Q[Qwen worker]
+    T --> X[Grok read-only research]
+    T -. explicit paid opt-in .-> D[DeepSeek worker]
+    Q --> G[Deterministic Gate]
+    D --> G
+    G --> C
 ```
 
-角色划分：
+## What v1.0 provides
 
-- **Codex**：拆任务、做架构判断、整合结果、最终回复。
-- **Qwen**：整理、总结、文档、测试草稿、宽泛第一遍调查。
-- **DeepSeek**：代码分析、bug 假设、实现草稿、diff 审查。
-- **Grok Search**：只读搜索 X 或 Web，返回实时结论、引用和实际扣费，不修改项目。
-- **Scout / Worker / Gate**：本地机械工作，完整记录落盘，只把必要摘要交给 Codex。
+- **GLM-first routing.** `glm-4.7-flash` receives an explicit routing preference while still being subject to capability, health, quota, and policy checks.
+- **Free-tier-aware provider fabric.** Zhipu, OpenRouter, Cloudflare Workers AI, Groq, ModelScope, NVIDIA NIM, Mistral, Gemini, SiliconFlow, OpenAI, and generic OpenAI-compatible endpoints share one MCP surface.
+- **Live discovery with conservative metadata.** Account-visible `/models` results are merged with a small, dated policy catalog. Unknown prices are never silently labeled free.
+- **Persistent resilience.** SQLite-backed request records, cooldowns, provider health, queue state, and circuit state survive process restarts.
+- **Safe failover rules.** Execution may move to the next eligible model on quota/capacity responses, rate limits, empty output, or server failures. Authentication and permission failures stop the route instead of leaking requests across providers.
+- **Hard local free-pool budgets.** The configured OpenRouter pool is capped at 50 calls per UTC day: GLM 5.2 (10), Inkling (10), North Mini Code (20), and Nemotron Ultra (10).
+- **Cloudflare free-plan awareness.** Gemma 4 26B and Nemotron 3 120B share the configured 10,000-neuron daily free allocation and hard-stop policy.
+- **Paid-model containment.** DeepSeek is manual-only by default. It is selected only with `preferred=deepseek`, `allow_paid_fallback=true`, or `worker_failover=true` where supported.
+- **Sanitized Mission Control.** The optional local UI shows the model roster, assignments, explicit expert debate, provider transitions, and quota state without prompts, credentials, responses, or hidden reasoning.
+- **Bounded local work.** AI Team implementation uses read-only planning, a single writing worker, risk-tiered checks, one targeted retry, and Codex takeover on hard failure.
+- **Compact handoffs.** Full artifacts stay on disk while Codex receives concise results, reducing main-context usage.
 
-## 为什么只保留一个 MCP
+## Default model hierarchy
 
-为每个模型各加载一套 MCP，会让每个 Codex 会话携带更多工具定义。本项目只保留一个 MCP，并暴露四个紧凑工具：
+The exact route depends on requested capabilities, current health, remaining allowance, and live discovery.
 
-- `delegate_task`：处理不需要本地文件工具的问答、草稿和分析；按任务复杂度自动选择一个或两个代码 Worker，复杂且依赖实时资料时再加入 Grok。
-- `grok_search`：一次只读 Web Search 或 X Search，`source=auto` 时一般实时资讯走 Web、帖子和舆论走 X；默认限制一个服务端工具回合。
-- `project_task`：把一整段本地侦查或实现交给自动扩编的 Qwen/DeepSeek 团队；实现后可自动运行确定性 Gate，只把交接包返回 Codex。
-- `worker_gate_review`：对结构化结果做确定性质量决策，也兼容原有的 diff 轻量审查。
-
-三个服务商仍是独立线路，只通过一个入口调度。
-
-## 主要特性
-
-- 自动按任务长度、验收项、架构范围、风险、跨领域数量和交互系统数量判定 `small / medium / complex`：小任务 1 个助手，复杂单页游戏等中大型任务会增加只读规划助手，复杂且需要实时资料时最多 3 个助手。
-- 多助手实现采用“只读规划/侦查 -> 单个 Worker 写入 -> Gate 验收”，两个代码助手不会并发修改同一个工作目录。
-- `project_task` 把文件发现、批量编辑和验证合并成一个 MCP 回合，避免 Codex 自己形成几十次 shell 循环。
-- Grok Search 默认 `max_turns=1`、关闭并行工具，只允许 X 或 Web 二选一，控制搜索调用费用。
-- 默认从服务商 `/models` 接口发现账号当前可用模型，并按代际与 `Flash / Plus / Pro` 档位自动选择。
-- 模型列表缓存一小时；新一代稳定别名上线后无需修改配置，模型不可用时同服务商最多回退一次。
-- `dry_run` 路由预览，不消耗模型 API。
-- 三档输出预算：`low`、`normal`、`deep`。
-- MCP 返回结果有字符上限，避免异常长回复进入 Codex 上下文。
-- Worker 完整输出写入磁盘，默认仅返回最多 30 行 / 3000 字符摘要。
-- 只读 Scout 默认最多 4 个 agent 回合；实现 Worker 默认最多 8 个回合。
-- Scout 专门处理大目录、日志、文件定位和第一遍项目调查。
-- Gate 检查构建、测试、类型检查、lint、HTML 内联脚本语法、diff 大小、依赖变化和密钥痕迹。
-- 质量策略固定为：90 分以上接受、80～89 分只返工一次、低于 80 分由 Codex 接管。
-- `project_task` 在首次 Gate 返回 `retry` 时会在同一个 MCP 调用内自动执行一次定向返工，并合并两轮修改和用量；第二轮仍不合格才交给 Codex。
-- 构建/测试失败、密钥痕迹、越界修改等硬故障会跳过返工，立即要求 Codex 接管。
-- Worker 和 Gate 都生成 JSON 交接文件，Codex 接手时无需重新扫描整个项目。
-- 没有首次提交的 Git 仓库使用 `unborn` 基线，不再误判为非 Git 项目。
-- API key 只从环境变量读取，不写入代码或 Codex 配置示例。
-- Router 基于 Node.js；本地 worker 脚本面向 Windows PowerShell。
-
-## 自动模型选择
-
-默认 `AI_TEAM_MODEL_MODE=auto`，固定的模型名称不是必填配置。MCP 和 PowerShell Worker 都会先读取账号可见的 `/models` 列表，然后：
-
-| 预算 | Qwen | DeepSeek |
+| Tier | Provider and configured models | Policy in v1.0 |
 |---|---|---|
-| `low` | 最新稳定 `flash` | 最新稳定 `flash` |
-| `normal` | 最新稳定 `plus` | 最新稳定 `pro` |
-| `deep` | 最新稳定 `plus` | 最新稳定 `pro` |
+| Preferred primary | Zhipu `glm-4.7-flash` | Zero-price metadata, 200K context metadata, explicit +25 routing preference |
+| Additional GLM capacity | Zhipu `glm-4.6`, `glm-4.5` | Account-dependent; discovered live |
+| Daily free pool | OpenRouter GLM 5.2, Inkling, North Mini Code, Nemotron Ultra | Local 10/10/20/10 daily call caps |
+| Shared free compute | Cloudflare Gemma 4 26B, Nemotron 3 120B | Shared 10,000-neuron policy |
+| Fast free inference | Groq GPT-OSS 120B, Qwen 3.6 27B | Provider free-plan metadata |
+| Community inference | ModelScope GLM 4.7 Flash, DeepSeek V4 Flash, Step 3.7 Flash | Daily free-call metadata; discovered live |
+| Large-model reserve | NVIDIA Nemotron 3 Ultra 550B | Hosted developer access; discovered live |
+| Promotional credit | Mistral Devstral, Mistral Vibe CLI Fast | Never treated as permanently free |
+| Optional integrations | Gemini, SiliconFlow, OpenAI, OpenAI-compatible | Used only when configured and policy-eligible |
 
-Grok Search 另外读取 xAI `/language-models` 的账号可见模型和实时价格。它优先稳定的文本非推理模型，再按输入/输出价格排序；如果候选模型不支持搜索，才回退到下一个同账号模型。当前账号实测优先 `grok-4.20-0309-non-reasoning`，未来模型升级后不需要手改版本号。
+`free_only` requires confirmed zero input and output prices. A promotional credit or unknown price does not qualify.
 
-选择器按模型家族和数字代际判断，不把某个版本号永久写死。例如未来出现 `qwen3.8-plus` 或 `deepseek-v5-flash`，只要它出现在账号可用列表中，就会优先于旧代稳定模型。`preview`、实时、语音、视觉等不适合当前文本/代码 Worker 的变体会被排除。
+## MCP tools
 
-模型列表接口暂时不可用时，系统才使用内置保底名单；普通认证失败、限流或服务错误不会触发乱换模型。只有明确的“模型不存在/无权限”错误允许同服务商回退一次。
+| Tool | Purpose |
+|---|---|
+| `budget_route` | Preview or execute capability-aware routing across the provider fabric |
+| `fabric_status` | Inspect sanitized provider queues, circuits, quotas, and local state |
+| `mission_control` | Start, stop, or inspect the local Mission Control UI |
+| `doctor` | Check runtime, worker harnesses, provider configuration presence, and trusted proxy state without model calls |
+| `delegate_task` | Delegate model-only drafts or analysis; Qwen is free-first and DeepSeek is opt-in |
+| `grok_search` | Perform read-only live Web/X research with citations and reported cost |
+| `project_task` | Delegate one bounded local inspect or implementation phase and optionally run the Gate |
+| `routine_workpack` | Process up to 12 routine chores through read-only and single-writer lanes |
+| `worker_gate_review` | Review ambiguous structured results or an explicitly supplied diff |
 
-如确实需要锁定模型，可配置：
+## Requirements
 
-```toml
-[mcp_servers.ai_team_mcp.env]
-AI_TEAM_MODEL_MODE = 'fixed'
-QWEN_MCP_MODEL = 'your-model-id'
-DEEPSEEK_MCP_MODEL = 'your-model-id'
-```
-
-内置价格只用于估算，实际账单以服务商和地区为准。默认档位参考 [阿里云百炼模型价格](https://help.aliyun.com/zh/model-studio/model-pricing) 和 [DeepSeek 官方模型价格](https://api-docs.deepseek.com/zh-cn/quick_start/pricing)。
-
-## 仓库结构
-
-```text
-codex-ai-team-router/
-├─ mcp-server/
-│  ├─ server.mjs          # Qwen / DeepSeek MCP 总控路由器
-│  ├─ quality-policy.mjs  # 确定性质量评分和接管状态机
-│  ├─ model-selector.mjs  # 动态模型发现与性价比选择
-│  ├─ usage-ledger.mjs    # Token 与费用本地账本
-│  ├─ xai-search.mjs      # Grok Web / X 搜索与自动模型选择
-│  ├─ project-task.mjs     # 本地 Scout / Worker / Gate 一体化委派
-│  ├─ smoke-test.mjs      # 不调用 API 的冒烟测试
-│  ├─ quality-policy-test.mjs
-│  └─ package.json
-├─ scripts/
-│  ├─ codex-scout.ps1     # 只读侦查，返回短结论
-│  ├─ codex-worker.ps1    # Qwen Code / Claude Code-DeepSeek 执行器
-│  ├─ codex-gate.ps1      # 本地验收与交接包生成器
-│  └─ codex-gate-test.ps1
-├─ examples/
-│  ├─ AGENTS.md
-│  └─ config.toml.example
-├─ benchmark/             # 8 项隔离训练场和隐藏验收
-├─ install.ps1
-└─ README.md
-```
-
-## 前置条件
-
-MCP Router：
-
-- Node.js 20 或更高版本
+- Node.js 20 or later
 - npm
-- Codex Desktop 或支持本地 MCP server 的 Codex 环境
-- 至少配置一个模型 API key
+- Codex Desktop or another MCP-compatible client
+- At least one supported provider credential
+- Windows PowerShell, Git, and optional Qwen/Claude Code harnesses for the AI Team execution plane
 
-可选 Worker：
+Model-only cluster routing is Node-based. The bundled local project workers currently target Windows PowerShell.
 
-- Qwen Code CLI，用于 Qwen agent 模式
-- Claude Code CLI，用于通过 Anthropic 兼容接口调用 DeepSeek agent 模式
-- Git，用于 diff 与仓库检查
-- 项目自身需要的 npm / Python / 编译工具
-
-## 安装
+## Install
 
 ```powershell
 git clone https://github.com/kennedymike936-lang/codex-ai-team-router.git
@@ -151,402 +115,137 @@ cd codex-ai-team-router
 powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-安装脚本会：
+The installer uses the lockfile, runs the offline test suite, and prints the absolute Node and MCP server paths.
 
-1. 检查 Node.js 和 npm。
-2. 在 `mcp-server` 中安装 MCP SDK。
-3. 运行不调用 Qwen / DeepSeek API 的完整本地测试。
-4. 输出 Node 和 MCP server 的绝对路径。
-
-若要维护独立运行副本，可一次同步 MCP 与 PowerShell 脚本，避免源码和部署目录漂移：
+To create a separate runtime copy:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -DeployRoot "D:\AI-Team"
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -DeployRoot "D:\AI-Cluster"
 ```
 
-## API 环境变量
+In v1.0 the deployed server directory is `ai-cluster-mcp-server`.
 
-不要把密钥写入仓库、README、`config.toml` 或 worker prompt。
+## Configure Codex
 
-Qwen 按以下顺序读取：
-
-```text
-DASHSCOPE_API_KEY
-OPENAI_API_KEY
-QWEN_API_KEY
-```
-
-DeepSeek 按以下顺序读取：
-
-```text
-ANTHROPIC_API_KEY
-ANTHROPIC_AUTH_TOKEN
-DEEPSEEK_API_KEY
-```
-
-Grok Search 读取：
-
-```text
-XAI_API_KEY
-```
-
-Windows 用户级环境变量示例：
-
-```powershell
-[Environment]::SetEnvironmentVariable("DASHSCOPE_API_KEY", "YOUR_KEY", "User")
-[Environment]::SetEnvironmentVariable("ANTHROPIC_API_KEY", "YOUR_KEY", "User")
-[Environment]::SetEnvironmentVariable("XAI_API_KEY", "YOUR_KEY", "User")
-```
-
-设置后需要重启 Codex，使桌面进程重新读取环境变量。
-
-## 接入 Codex
-
-打开 `~/.codex/config.toml`，参考 [examples/config.toml.example](examples/config.toml.example) 添加 MCP server。
-
-Windows 示例：
+Copy [examples/config.toml.example](examples/config.toml.example) and replace both paths with absolute paths:
 
 ```toml
-[mcp_servers.ai_team_mcp]
+[mcp_servers.ai_cluster_mcp]
 command = 'C:\Program Files\nodejs\node.exe'
 args = ['C:\absolute\path\codex-ai-team-router\mcp-server\server.mjs']
 startup_timeout_sec = 60
 
-[mcp_servers.ai_team_mcp.env]
-QWEN_MCP_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
-DEEPSEEK_MCP_BASE_URL = 'https://api.deepseek.com/anthropic'
-XAI_MCP_BASE_URL = 'https://api.x.ai/v1'
+[mcp_servers.ai_cluster_mcp.env]
+ZHIPU_BASE_URL = 'https://open.bigmodel.cn/api/paas/v4'
+OPENROUTER_MCP_BASE_URL = 'https://openrouter.ai/api/v1'
+GROQ_BASE_URL = 'https://api.groq.com/openai/v1'
 ```
 
-不填写模型名即使用自动模式。
+Credentials are read from the Codex process environment or the Windows user environment. Keep values out of the repository and config example.
 
-用下面的命令查找 Node 绝对路径：
+| Provider | Credential environment variables |
+|---|---|
+| Zhipu | `ZHIPU_API_KEY` |
+| OpenRouter | `OPENROUTER_API_KEY` |
+| Cloudflare | `CLOUDFLARE_ACCOUNT_ID` plus `CLOUDFLARE_API_TOKEN` or `CLOUDFLARE_AUTH_TOKEN` |
+| Groq | `GROQ_API_KEY` |
+| ModelScope | `MODELSCOPE_API_KEY` |
+| NVIDIA | `NVIDIA_API_KEY` or `NVIDIA_NIM_API_KEY` |
+| Mistral | `MISTRAL_API_KEY` |
+| Gemini | `GEMINI_API_KEY` or `GOOGLE_API_KEY` |
+| SiliconFlow | `SILICONFLOW_API_KEY` |
+| OpenAI | `OPENAI_API_KEY` |
+| Generic compatible endpoint | `OPENAI_COMPATIBLE_API_KEY` |
+| Qwen execution worker | `DASHSCOPE_API_KEY`, `QWEN_API_KEY`, or legacy compatible configuration |
+| DeepSeek execution worker | `DEEPSEEK_API_KEY`, `ANTHROPIC_API_KEY`, or `ANTHROPIC_AUTH_TOKEN` |
+| Grok research | `XAI_API_KEY` |
 
-```powershell
-(Get-Command node).Source
-```
+Restart Codex after changing user-scoped environment variables.
 
-重启 Codex 后，工具列表中应出现：
+## Route examples
 
-```text
-delegate_task
-grok_search
-project_task
-worker_gate_review
-```
-
-## MCP 使用示例
-
-自动路由：
+Preview the GLM-first free route without making a model call:
 
 ```json
 {
-  "task": "分析这个 TypeScript 报错并给出最小修复方案",
-  "preferred": "auto",
-  "budget": "low"
-}
-```
-
-只看路由，不调用 API：
-
-```json
-{
-  "task": "整理项目结构并起草 README",
-  "preferred": "auto",
+  "task": "Review this API design and identify the three largest risks.",
+  "mode": "free_only",
+  "requirements": { "capabilities": ["code"] },
+  "providers": ["zhipu", "openrouter", "cloudflare", "groq"],
   "dry_run": true
 }
 ```
 
-强制双轨：
+Execute the route with provider-aware thinking disabled:
 
 ```json
 {
-  "task": "比较两种架构并检查代码风险",
-  "preferred": "both",
-  "budget": "normal"
+  "task": "Draft a compact TypeScript implementation plan.",
+  "mode": "free_only",
+  "thinking": "disabled",
+  "max_tokens": 1200,
+  "dry_run": false
 }
 ```
 
-把一整段本地实现交给副手并自动验收：
+Delegate a bounded local implementation through the optional AI Team layer:
 
 ```json
 {
-  "task": "定位登录失败原因，提交最小修复并运行现有检查",
+  "task": "Fix the failing login validation and run existing checks.",
   "cwd": "C:\\path\\to\\project",
   "mode": "implement",
-  "preferred": "auto",
-  "max_assistants": 3,
   "allowed_paths": ["src/auth", "tests"],
   "budget": "low",
-  "run_gate": true
+  "run_gate": true,
+  "worker_failover": false
 }
 ```
 
-只读侦查时把 `mode` 设为 `inspect`。`max_assistants` 是费用上限，不是固定人数；自动调度只会使用必要的助手。实现模式默认使用非交互权限，非 Git 目录会先初始化本地 Git 基线；允许路径、Git diff、密钥扫描和项目检查由 Gate 兜底。首次 Gate 只要求返工时，`project_task` 会内部自动完成第二次定向尝试，无需 Codex 再发一次 MCP 请求。完整产物留在 `%USERPROFILE%\.codex-ai-team\runs`，MCP 只返回短摘要和路径。
+## Mission Control
 
-确定性质量决策（不调用模型 API）：
+Call `mission_control` with `{"action":"start"}` to open the optional observer surface. It binds only to `127.0.0.1`. The right-hand roster lists configured cluster models and reports the local daily remainder where the router has an enforceable request cap.
 
-```json
-{
-  "evaluation": {
-    "task_id": "login-fix-001",
-    "attempt": 1,
-    "scores": {
-      "functionality": 35,
-      "requirements": 20,
-      "code_quality": 10,
-      "safety": 10,
-      "maintainability": 10
-    },
-    "hard_failures": [],
-    "summary": "核心流程已修复，但缺少一个边界测试。",
-    "changed_files": ["src/login.ts", "test/login.test.ts"]
-  }
-}
-```
+The **Expert debate** view shows only explicit proposals, challenges, citations, assignments, and decisions. It intentionally does not expose hidden chain-of-thought. Prompts, credentials, raw responses, and private artifacts never enter this surface.
 
-该示例得到 85 分，第一次返回 `retry`；相同任务以 `attempt: 2` 再次得到 85 分时返回 `takeover`。
+## Reliability and safety boundaries
 
-## 质量优先接管策略
+- `budget_route` defaults to `dry_run=true`.
+- A free route never silently crosses into a paid model.
+- Authentication/permission failures do not trigger provider failover.
+- Provider cooldowns prevent repeatedly spending calls on an unhealthy route.
+- Local project implementation is single-writer and can be isolated in a temporary Git worktree.
+- The Gate checks relevant build/test/type/lint commands, changed scope, diff size, dependency changes, and secret-like content.
+- A Gate score of 90 or higher is accepted; 80–89 may receive one targeted retry; lower scores or hard failures return control to Codex.
+- Workers and project scripts execute with the current user's permissions. The Gate is not an operating-system sandbox.
 
-质量分用于表达**交付置信度**，不是宣称可以用数学精确衡量代码。评分满分 100：
+Read [SECURITY.md](SECURITY.md) before using local workers on sensitive or untrusted projects.
 
-| 维度 | 分值 |
-|---|---:|
-| 核心功能、构建和测试 | 40 |
-| 需求完成度 | 25 |
-| 类型、lint 和代码质量 | 15 |
-| 安全与修改范围 | 10 |
-| 可维护性 | 10 |
+## Local validation
 
-决策规则：
-
-- `90～100`：接受结果，停止无收益的精雕细琢。
-- `80～89`：第一次只修失败项；第二次仍未达到 90 分，由 Codex 接管。
-- `< 80`：不继续烧 worker token，Codex 直接接管。
-- 任意硬故障：无视分数，立即接管。
-
-硬故障包括构建/测试/类型/lint 失败、疑似密钥、禁止文件、超出允许路径、diff 失控和需求明确失败。接管顺序是先恢复可交付状态，再分析 worker 为什么失手；复盘不能阻塞修复。
-
-## Scout：把大范围调查交给副手
-
-Scout 不修改文件，适合：
-
-- 搜索项目入口和关键模块
-- 查找某段功能位于哪些文件
-- 阅读大量日志并只返回相关行
-- 给陌生项目做第一遍结构调查
+The default suite is offline and does not intentionally call provider APIs:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-scout.ps1 `
-  -Task "查找登录流程、关键文件和相关测试，只返回路径和关键行" `
-  -Cwd "C:\path\to\project" `
-  -Worker auto
+cd mcp-server
+npm ci
+npm test
 ```
 
-完整结果默认保存在：
+Live probes are separate opt-in commands and can consume provider quota.
 
-```text
-%USERPROFILE%\.codex-ai-team\runs
-```
+## Migrating from 0.x
 
-Codex 终端只接收紧凑摘要。
+1. Pull the new default branch and run `install.ps1` again.
+2. Rename the Codex MCP entry from `ai_team_mcp` to `ai_cluster_mcp` when adopting the new example.
+3. If using `-DeployRoot`, update the server path from `ai-team-mcp-server` to `ai-cluster-mcp-server`.
+4. Restart Codex so it loads MCP server identity `ai-cluster-mcp-server` version `1.0.0`.
+5. Keep existing `AI_TEAM_*` environment variables for now; v1.0 retains them as compatibility names.
+6. Review paid fallback settings. DeepSeek no longer participates in automatic routing unless explicitly enabled for that request.
 
-## Worker：受控执行任务
+See [CHANGELOG.md](CHANGELOG.md) for the complete release summary and [ARCHITECTURE.md](ARCHITECTURE.md) for design invariants.
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-worker.ps1 `
-  -Worker qwen `
-  -Task "在 src/utils 中补齐重复的输入校验，并运行已有测试" `
-  -Cwd "C:\path\to\project" `
-  -TaskId "input-validation-001" `
-  -Attempt 1 `
-  -AllowedPath @("src/utils", "test") `
-  -Budget low `
-  -Approval yolo `
-  -MaxWallTime 8m
-```
+## Contributing and license
 
-DeepSeek worker：
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. Security reports belong in GitHub private vulnerability reporting, not a public issue.
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-worker.ps1 `
-  -Worker deepseek `
-  -Task "定位失败测试并提交最小修复" `
-  -Cwd "C:\path\to\project" `
-  -DeepSeekMaxBudgetUsd 0.10
-```
-
-直接调用脚本时，`auto` 可能在无交互后台拒绝编辑；需要实际实现时使用 `yolo`，并同时设置 `AllowedPath`、保持 Git 可恢复、随后运行 Gate。`project_task` 已把这套流程串联起来。
-
-## Gate：轻量验收
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex-gate.ps1 `
-  -Cwd "C:\path\to\git-project" `
-  -TaskId "input-validation-001" `
-  -Task "补齐输入校验并运行测试" `
-  -Attempt 1 `
-  -RequirementStatus pass `
-  -AllowedPath @("src/utils", "test")
-```
-
-Gate 会尽可能检查：
-
-1. 代码能否构建或运行
-2. 测试能否通过
-3. 类型检查能否通过
-4. lint 能否通过
-5. 变更的 HTML 内联脚本能否通过语法检查
-6. 是否修改敏感或禁止文件
-7. diff 是否过大或改动依赖文件
-8. diff 是否包含疑似 API key / private key
-
-Gate 会在运行目录下写入：
-
-- `gate.md`：供人阅读的检查报告。
-- `handoff.json`：供 Codex 接管的精简状态包，包含任务、分数、失败项、修改文件和完整产物路径。
-
-`RequirementStatus` 可设为 `pass`、`partial`、`unknown` 或 `fail`。只有确认核心需求已完成时才使用 `pass`；`unknown` 会降低置信度并触发一次定向返工。Gate 依赖 Git；没有首次提交的仓库会使用自适应 `unborn` 基线，完全不是 Git 的目录仍会要求 Codex 接管。
-
-## Codex 调用预算
-
-- 非简单项目优先用一次 `project_task` 完成侦查或实现，不先由 Codex 逐文件扫描。
-- Codex 连续执行约 8 次本地工具调用仍未形成可验收产物时，应停止扩张上下文，把剩余阶段整包委派。
-- Gate 为 `accept` 时，Codex 读取交接摘要即可集成，不再重复读取所有文件和日志。
-- `project_task` 收到 Gate 的 `retry` 时会在内部只返工失败项；最终为 `takeover` 时 Codex 读取 `handoff.json` 后接管，不从头调查。
-- 小改动、单命令回答和最终架构决策无需为了委派而委派。
-- 自动扩编仍以性价比为先：复杂度不足时不会为了凑人数调用第二个模型，Grok 只在任务确实依赖当前外部信息时加入。
-
-直接单独运行 Worker / Gate 脚本时，第二次返工应保持同一个 `TaskId` 并将 `Attempt` 改为 `2`。通过 `project_task` 调用时这一步已自动完成；如果第二轮仍低于 90 分，工具会输出 `takeover`，Codex 直接读取 `handoff.json` 和其中引用的 worker 产物继续工作。
-
-## 成本账本
-
-MCP 请求会记录服务商返回的准确 Token 用量、模型、耗时、是否回退和按公开单价计算的费用估算：
-
-```text
-%USERPROFILE%\.codex-ai-team\usage\usage.jsonl
-```
-
-xAI 请求还会记录官方 `cost_in_usd_ticks` 换算出的实际美元扣费、服务端搜索次数和引用 URL；该金额已经包含 Token、缓存折扣和搜索工具调用。
-
-Qwen Code Agent 外壳使用结构化 JSON 输出，Worker 账本会记录服务商返回的输入、输出、缓存 Token、回合数和公开单价估算。旧版 Claude Code 兼容外壳仍不提供统一 Token 字段，因此该模式只记录可验证信息，不编造用量：
-
-```text
-%USERPROFILE%\.codex-ai-team\usage\worker-runs.jsonl
-```
-
-账本中的 `estimated_cost_cny` 只是按仓库价格目录计算的估值；缓存折扣、限时活动、地域和账户阶梯价以服务商账单为准。Worker 的完整结构化响应保存在每次运行目录的 `qwen-result.json`，Codex 默认只读取短摘要。
-
-DeepSeek Worker 默认使用 Qwen Code 的 OpenAI-compatible Agent 外壳，并在每次运行目录中生成不含密钥的临时 Provider 配置，声明 DeepSeek V4 的上下文能力；这避免 Claude Code 对第三方模型费用的错误估算。需要兼容旧流程时可显式传入 `-DeepSeekHarness claude`。
-
-可以手动执行极小的在线探针验证两个账号和自动选择。该命令会产生少量模型费用，不会被 `npm test` 自动执行：
-
-```powershell
-cd .\mcp-server
-npm run probe:live
-```
-
-单独验证 Grok 自动选模、一次搜索限制、引用和实际扣费（会产生一次 xAI 搜索费用）：
-
-```powershell
-npm run probe:xai
-```
-
-## 8 项训练场
-
-训练场会为每项任务复制独立项目并初始化 Git，不碰真实工程。只准备任务不扣模型 Token：
-
-```powershell
-.\benchmark\run-benchmark.ps1 -TaskId T3
-```
-
-确认后执行：
-
-```powershell
-.\benchmark\run-benchmark.ps1 -TaskId T3 -Execute
-```
-
-任务清单、允许路径和验收目标见 [benchmark/tasks.json](benchmark/tasks.json)。代码任务会运行隐藏验收和 Gate，结果保存在 `%USERPROFILE%\.codex-ai-team\benchmark`。
-
-每次代码任务的模型、隐藏验收、质量分、决策和交接路径汇总在：
-
-```text
-%USERPROFILE%\.codex-ai-team\benchmark\benchmark-results.jsonl
-```
-
-## Token 节省原理
-
-项目主要减少的是 **Codex 对话上下文增长**，并不保证降低所有模型的总费用：
-
-- 大目录和日志先由外部 worker 调查。
-- 完整 worker 过程留在磁盘，不重复塞进 Codex。
-- Codex 只拿结论、路径、行号和短摘要。
-- 一个 MCP Router 代替两套重复的模型工具定义。
-- 简单任务默认使用较小输出预算。
-- 低风险结果不强制进行第二次模型审查。
-
-在一次本地调试记录中，未限制输出时上下文曾从约 18k 增长到 153k；第一轮输出优化后，同类过程约增长到 63k。这个数字只用于说明长工具输出的影响，不是通用 benchmark，也不代表你的账户一定获得同样比例的节省。
-
-## 安全说明
-
-完整的信任边界、安全使用基线和私密漏洞报告流程见 [SECURITY.md](SECURITY.md)。
-
-- 本项目不会把 API key 写入源代码。
-- MCP 和脚本会读取用户环境变量中的 key。
-- Worker 能运行工具并修改工作区，运行前应确认目标目录正确。
-- 完整 worker 日志可能包含任务中出现的敏感信息，**项目不会自动保证日志脱敏**。
-- 不要把 `.env`、私钥、支付数据、账号凭据或私人聊天内容交给外部模型。
-- 建议在 Git 仓库或有备份的目录中运行 worker。
-- 发布或分享 `runs` 目录前应人工检查内容。
-
-## 可选路径变量
-
-如果 Node、Git、Qwen Code 或 Claude Code 不在系统 PATH，可设置：
-
-```text
-AI_TEAM_NODE_DIR
-AI_TEAM_GIT_DIR
-AI_TEAM_TOOLS_DIR
-```
-
-脚本也会自动尝试 `%APPDATA%\npm`。
-
-## 故障排查
-
-### Codex 中看不到 MCP 工具
-
-- 检查 `command` 和 `args` 是否都是绝对路径。
-- 运行 `npm run smoke`。
-- 修改 `config.toml` 后重启 Codex。
-
-### Qwen 请求失败
-
-- 检查 `DASHSCOPE_API_KEY`。
-- 检查模型名和百炼兼容模式 endpoint。
-- 确认账户所在地域与模型权限匹配。
-
-### DeepSeek 请求失败
-
-- 检查 `ANTHROPIC_API_KEY` 或 `ANTHROPIC_AUTH_TOKEN`。
-- 确认接口支持 Anthropic Messages 兼容格式。
-- 运行 `npm run probe:live` 检查账号可见模型和自动选择结果。
-- 只有使用 `AI_TEAM_MODEL_MODE=fixed` 时才需要人工检查 `DEEPSEEK_MCP_MODEL`。
-
-### Worker 卡住或输出过长
-
-- 降低 `MaxWallTime`。
-- 使用 Scout 先做只读调查。
-- 检查 `%USERPROFILE%\.codex-ai-team\runs` 中的完整结果。
-- 将 `SummaryLines` 和 `SummaryMaxChars` 保持在较小范围。
-
-## 设计取舍
-
-- MCP Router 尽量轻量，没有引入完整多 agent 框架。
-- 路由规则是启发式，不会永远选中最合适的模型。
-- PowerShell worker 主要面向 Windows；MCP Router 本身基于 Node.js，改造后可在其他系统运行。
-- 工具描述和返回内容刻意保持短小，以降低长期上下文负担。
-
-## License
-
-[MIT](LICENSE)
+Codex AI Cluster is released under the [MIT License](LICENSE).

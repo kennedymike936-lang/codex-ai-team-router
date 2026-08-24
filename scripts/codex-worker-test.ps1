@@ -6,14 +6,15 @@ $worker = Join-Path $PSScriptRoot "codex-worker.ps1"
 $fixture = Join-Path ([IO.Path]::GetTempPath()) "ai-team-worker-usage-$([guid]::NewGuid().ToString('N'))"
 
 function Invoke-UsageParser {
-  param([string]$Json, [string]$ErrorText = "")
+  param([string]$Json, [string]$ErrorText = "", [string]$ProviderLedger = "")
   $jsonPath = Join-Path $fixture "events.json"
   $errorPath = Join-Path $fixture "stderr.txt"
   $textPath = Join-Path $fixture "result.txt"
   $Json | Set-Content -LiteralPath $jsonPath -Encoding UTF8
   $ErrorText | Set-Content -LiteralPath $errorPath -Encoding UTF8
   $raw = & $worker -Worker qwen -Task "usage parser fixture" -UsageParseOnly `
-    -UsageParseJsonPath $jsonPath -UsageParseErrorPath $errorPath -UsageParseTextPath $textPath -JsonOnly
+    -UsageParseJsonPath $jsonPath -UsageParseErrorPath $errorPath -UsageParseProviderLedgerPath $ProviderLedger `
+    -UsageParseTextPath $textPath -JsonOnly
   return (($raw -join "`n") | ConvertFrom-Json)
 }
 
@@ -57,7 +58,20 @@ try {
   }
   Write-Host "Fixture 4 (FatalTurnLimitedError, no events): passed"
 
-  Write-Host "Worker usage parser: 4 fixtures passed"
+  # Fixture 5 - the run-local provider ledger is authoritative and exposes
+  # cache-adjusted input, thinking tokens, request count, and API duration.
+  $providerLedger = Join-Path $fixture "token-usage.jsonl"
+  @'
+{"model":"qwen3.7-plus","inputTokens":100,"outputTokens":10,"cachedTokens":60,"thoughtsTokens":3,"totalTokens":110,"apiDurationMs":700}
+{"model":"qwen3.7-plus","inputTokens":140,"outputTokens":20,"cachedTokens":100,"thoughtsTokens":5,"totalTokens":160,"apiDurationMs":900}
+'@ | Set-Content -LiteralPath $providerLedger -Encoding UTF8
+  $ledgerRecovered = Invoke-UsageParser -Json "" -ErrorText '{"error":{"type":"FatalTurnLimitedError"}}' -ProviderLedger $providerLedger
+  if ($ledgerRecovered.availability -ne "recovered" -or $ledgerRecovered.input_tokens -ne 240 -or $ledgerRecovered.cache_read_tokens -ne 160 -or $ledgerRecovered.uncached_input_tokens -ne 80 -or $ledgerRecovered.thinking_tokens -ne 8 -or $ledgerRecovered.request_count -ne 2 -or $ledgerRecovered.provider_duration_ms -ne 1600 -or $ledgerRecovered.requests.Count -ne 2) {
+    throw "Provider ledger fixture: expected exact summed and per-request usage."
+  }
+  Write-Host "Fixture 5 (provider ledger recovery): passed"
+
+  Write-Host "Worker usage parser: 5 fixtures passed"
 
   # Source-level safe-mode assertions (line-based to avoid nested-paren issues)
   $sourcePath = Join-Path $PSScriptRoot "codex-worker.ps1"
@@ -69,6 +83,20 @@ try {
   $sourceText = $sourceLines -join "`n"
   foreach ($requiredGuidance in @("hard work budget", "one-third of the turns", "Reserve the final 2 turns", "do not create plans or todos")) {
     if (-not $sourceText.Contains($requiredGuidance)) { throw "Missing turn-budget guidance: $requiredGuidance" }
+  }
+  foreach ($requiredReliabilityText in @("Do not start another large generated file", "complete and validate one allowed file", 'DEEPSEEK_API_KEY', 'ReadAllText($promptPath) | & qwen @deepSeekArgs', 'contextWindowSize = 1000000', '2> $qwenErrorPath')) {
+    if (-not $sourceText.Contains($requiredReliabilityText)) { throw "Missing worker reliability behavior: $requiredReliabilityText" }
+  }
+  foreach ($requiredProtocolText in @('EmitProtocolEvents', 'protocol_version = "2.0"', 'worker.started', 'worker.completed', 'outcome = $workerOutcome', 'protocol_events = $protocolPath', 'verified_noop')) {
+    if (-not $sourceText.Contains($requiredProtocolText)) { throw "Missing Worker Protocol v2 behavior: $requiredProtocolText" }
+  }
+  $rootWorker = Join-Path (Split-Path -Parent $PSScriptRoot) "codex-worker.ps1"
+  if ([IO.File]::ReadAllText($rootWorker) -ne [IO.File]::ReadAllText($sourcePath)) {
+    throw "Root and scripts codex-worker.ps1 copies must remain identical."
+  }
+  Write-Host "Worker Protocol v2 source and synchronized-copy assertions passed"
+  if ($sourceText -match '(?i)claude|DeepSeekHarness|DeepSeekMaxBudgetUsd') {
+    throw "Claude compatibility code must not remain in the unified Qwen harness worker."
   }
 
   function Test-ArgArrayHasFlag {
@@ -95,16 +123,9 @@ try {
   }
   Write-Host "safe-mode assertion 2: `$deepSeekArgs has --safe-mode"
 
-  # 3) $claudeArgs must NOT contain --safe-mode
-  if (Test-ArgArrayHasFlag -Lines $sourceLines -VarName '$claudeArgs' -Flag '--safe-mode') {
-    throw "`$claudeArgs must NOT contain --safe-mode."
-  }
-  Write-Host "safe-mode assertion 3: `$claudeArgs lacks --safe-mode"
+  Write-Host "Worker safe-mode: 2 source-level assertions passed"
 
-  Write-Host "Worker safe-mode: 3 source-level assertions passed"
-
-  # Source-level stream-json assertions: both Qwen arg arrays use stream-json,
-  # Claude arg array does not.
+  # Source-level stream-json assertions: both Qwen arg arrays use stream-json.
   $streamJsonCount = @($sourceLines | Select-String -SimpleMatch '"stream-json"').Count
   if ($streamJsonCount -ne 2) {
     throw "Expected exactly two Qwen --output-format stream-json arguments, found $streamJsonCount."
@@ -118,11 +139,6 @@ try {
     throw "`$deepSeekArgs must use --output-format stream-json."
   }
   Write-Host "stream-json assertion 2: `$deepSeekArgs uses stream-json"
-  if (Test-ArgArrayHasFlag -Lines $sourceLines -VarName '$claudeArgs' -Flag 'stream-json') {
-    throw "`$claudeArgs must NOT use stream-json."
-  }
-  Write-Host "stream-json assertion 3: `$claudeArgs lacks stream-json"
-
   Write-Host "All tests passed."
 } finally {
   if (Test-Path -LiteralPath $fixture) { Remove-Item -LiteralPath $fixture -Recurse -Force }

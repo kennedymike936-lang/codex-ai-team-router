@@ -1,4 +1,5 @@
 import { recordUsage, usageEvent } from "./usage-ledger.mjs";
+import { resilientFetch } from "./network-client.mjs";
 
 const DEFAULT_TTL_MS = 60 * 60 * 1000;
 const FALLBACK_MODELS = [
@@ -57,7 +58,7 @@ export function xaiLanguageModelsEndpoint(baseUrl) {
 }
 
 export class XaiSearchModelSelector {
-  constructor({ fetchImpl = fetch, ttlMs = DEFAULT_TTL_MS, now = () => Date.now() } = {}) {
+  constructor({ fetchImpl = resilientFetch, ttlMs = DEFAULT_TTL_MS, now = () => Date.now() } = {}) {
     this.fetchImpl = fetchImpl;
     this.ttlMs = ttlMs;
     this.now = now;
@@ -182,7 +183,7 @@ function searchTool({ source, allowedXHandles, fromDate, toDate }) {
 
 export class XaiSearchClient {
   constructor({
-    fetchImpl = fetch,
+    fetchImpl = resilientFetch,
     selector = new XaiSearchModelSelector({ fetchImpl }),
     recordUsageImpl = recordUsage,
   } = {}) {

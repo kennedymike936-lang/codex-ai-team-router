@@ -1,12 +1,20 @@
 # Replace both paths with absolute paths on your computer.
-[mcp_servers.ai_team_mcp]
+[mcp_servers.ai_cluster_mcp]
 command = 'C:\Program Files\nodejs\node.exe'
 args = ['C:\absolute\path\codex-ai-team-router\mcp-server\server.mjs']
 startup_timeout_sec = 60
 
-[mcp_servers.ai_team_mcp.env]
+[mcp_servers.ai_cluster_mcp.env]
 QWEN_MCP_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
 DEEPSEEK_MCP_BASE_URL = 'https://api.deepseek.com/anthropic'
 XAI_MCP_BASE_URL = 'https://api.x.ai/v1'
-# AI_TEAM_MODEL_MODE defaults to 'auto'. Set it to 'fixed' only when you
+# Optional Local AI Fabric providers. Keep API keys in user-scoped environment
+# variables or a system credential store; do not put key values in this file.
+# GROQ_API_KEY / GROQ_BASE_URL
+# ZHIPU_API_KEY / ZHIPU_BASE_URL
+# MODELSCOPE_API_KEY / MODELSCOPE_BASE_URL
+# NVIDIA_API_KEY (or NVIDIA_NIM_API_KEY) / NVIDIA_BASE_URL
+# MISTRAL_API_KEY / MISTRAL_BASE_URL
+# Legacy AI_TEAM_* environment names remain supported in v1.0.0. AI_TEAM_MODEL_MODE
+# defaults to 'auto'. Set it to 'fixed' only when you
 # intentionally want QWEN_MCP_MODEL / DEEPSEEK_MCP_MODEL / XAI_SEARCH_MODEL pinned.

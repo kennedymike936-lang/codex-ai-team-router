@@ -11,10 +11,16 @@ const transport = new StdioClientTransport({
 await client.connect(transport);
 const listed = await client.listTools();
 const names = listed.tools.map((tool) => tool.name).sort();
-const expected = ["delegate_task", "grok_search", "project_task", "worker_gate_review"];
+const expected = ["delegate_task", "doctor", "grok_search", "mission_control", "project_task", "routine_workpack", "worker_gate_review"];
 
 for (const name of expected) {
   if (!names.includes(name)) throw new Error(`Missing MCP tool: ${name}`);
+}
+
+const doctorCall = await client.callTool({ name: "doctor", arguments: {} });
+const doctor = JSON.parse(doctorCall.content?.[0]?.text || "{}");
+if (!doctor.summary || !Array.isArray(doctor.providers) || !doctor.proxy || !Array.isArray(doctor.notes)) {
+  throw new Error(`Unexpected doctor result shape: ${JSON.stringify(doctor)}`);
 }
 
 const preview = await client.callTool({
@@ -22,7 +28,7 @@ const preview = await client.callTool({
   arguments: { task: "Fix a TypeScript bug", dry_run: true },
 });
 const previewText = preview.content?.[0]?.text || "";
-if (!previewText.includes("deepseek")) {
+if (!previewText.includes("Route: qwen") || previewText.includes("Route: deepseek")) {
   throw new Error(`Unexpected dry-run route: ${previewText}`);
 }
 
@@ -49,8 +55,33 @@ const projectPreview = await client.callTool({
   arguments: { task: "Fix a bounded TypeScript bug", cwd: process.cwd(), dry_run: true },
 });
 const projectPreviewJson = JSON.parse(projectPreview.content?.[0]?.text || "{}");
-if (projectPreviewJson.mode !== "implement" || projectPreviewJson.worker !== "deepseek" || projectPreviewJson.run_gate !== true) {
+if (projectPreviewJson.mode !== "implement" || projectPreviewJson.worker !== "qwen" || projectPreviewJson.run_gate !== true || projectPreviewJson.worker_failover !== false) {
   throw new Error(`Unexpected project dry-run: ${JSON.stringify(projectPreviewJson)}`);
+}
+
+const missionStatus = await client.callTool({ name: "mission_control", arguments: { action: "status" } });
+const missionStatusJson = JSON.parse(missionStatus.content?.[0]?.text || "{}");
+if (missionStatusJson.running !== false || missionStatusJson.host !== "127.0.0.1") {
+  throw new Error(`Unexpected Mission Control status: ${JSON.stringify(missionStatusJson)}`);
+}
+
+const workpackPreview = await client.callTool({
+  name: "routine_workpack",
+  arguments: {
+    cwd: process.cwd(),
+    dry_run: true,
+    items: [
+      { id: "docs", task: "Update README", allowed_paths: ["README.md"] },
+      { id: "deploy", task: "Deploy to production", allowed_paths: ["deploy"] },
+    ],
+  },
+});
+const workpackPreviewJson = JSON.parse(workpackPreview.content?.[0]?.text || "{}");
+if (workpackPreviewJson.autonomous_count !== 1 || workpackPreviewJson.escalation_count !== 1) {
+  throw new Error(`Unexpected workpack dry run: ${JSON.stringify(workpackPreviewJson)}`);
+}
+if (workpackPreviewJson.worker_slots?.[0]?.model !== "gpt-5.6-luna") {
+  throw new Error(`Missing reserved Luna worker slot: ${JSON.stringify(workpackPreviewJson.worker_slots)}`);
 }
 
 const quality = await client.callTool({
@@ -78,5 +109,6 @@ console.log(`MCP tools: ${names.join(", ")}`);
 console.log(`Dry run: ${previewText}`);
 console.log(`Grok dry run: ${grokPreviewText}`);
 console.log(`Project dry run: ${projectPreviewJson.worker} -> gate ${projectPreviewJson.run_gate}`);
+console.log(`Routine workpack: ${workpackPreviewJson.autonomous_count} autonomous, ${workpackPreviewJson.escalation_count} escalated`);
 console.log(`Quality gate: ${handoff.score} -> ${handoff.decision}`);
 await client.close();

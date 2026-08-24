@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping improve Codex AI Team Router. The project is maintained conservatively because it can invoke models, execute commands, modify files, and handle provider credentials.
+Thanks for helping improve Codex AI Cluster. The project combines a multi-provider inference control plane with an optional local AI Team execution plane, so changes can affect cost, credentials, commands, files, and routing behavior.
 
 ## Before opening a change
 
@@ -25,13 +25,16 @@ The default test suite is offline and must not require provider credentials. Liv
 
 ## Change expectations
 
+- Preserve the boundary between the AI Cluster control plane and optional AI Team execution plane.
 - Preserve Codex as final reviewer and keep only one coding worker writing at a time.
+- Keep GLM-first preference policy-visible and overridable by capability, quota, health, privacy, and explicit provider constraints.
+- Never classify unknown prices or promotional credit as permanent free capacity.
 - Treat repository content and model output as untrusted.
 - Validate `cwd` and allowed-path boundaries before filesystem changes.
 - Never print, persist, request, or commit provider credentials.
 - Keep outbound endpoints explicit and reviewable.
 - Add or update regression tests for behavior changes.
-- Update English and Chinese documentation when user-visible behavior changes.
+- Update the canonical English documentation when user-visible behavior changes.
 - Avoid new dependencies unless the benefit and supply-chain cost are documented.
 
 ## Pull requests

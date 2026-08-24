@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildTargetedRetryPrompt, selectTurnPolicy } from "./turn-policy.mjs";
+import { buildTargetedRetryPrompt, selectScoutTurnPolicy, selectTurnPolicy } from "./turn-policy.mjs";
+
+test("read-only scouts reserve a final answer turn by complexity", () => {
+  assert.equal(selectScoutTurnPolicy({ complexity: "small", attempt: 1 }).max_session_turns, 4);
+  assert.equal(selectScoutTurnPolicy({ complexity: "medium", attempt: 1 }).max_session_turns, 5);
+  assert.equal(selectScoutTurnPolicy({ complexity: "complex", attempt: 1 }).max_session_turns, 7);
+  const retry = selectScoutTurnPolicy({ complexity: "complex", attempt: 2 });
+  assert.equal(retry.max_session_turns, 4);
+  assert.equal(retry.policy, "focused_scout_failover");
+  assert.match(retry.reason, /tool-free final answer turn/i);
+});
 
 test("small task gets lower turns than the default 8", () => {
   const policy = selectTurnPolicy({ complexity: "small", attempt: 1 });

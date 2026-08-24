@@ -2,9 +2,9 @@
 
 ## Project status
 
-Codex AI Team Router is early-stage local developer tooling. It coordinates agents that may read files, execute commands, call external services, and modify a selected workspace. Its validation Gate reduces risk but is not a sandbox or a security guarantee.
+Codex AI Cluster is local developer tooling with two distinct surfaces: a multi-provider inference control plane and an optional AI Team execution plane. Provider calls can transmit task content, while local workers may read files, execute commands, and modify a selected workspace. Routing policy and the validation Gate reduce risk but are not a sandbox or security guarantee.
 
-Only the latest commit on the default branch is currently supported with security fixes. Published releases will be listed here when a stable release process is established.
+Security fixes target the latest release and the latest commit on the default branch. Version 1.0.0 establishes the stable release line; older 0.x builds are not supported.
 
 ## Report a vulnerability
 
@@ -40,9 +40,13 @@ Implementation workers can execute model-generated commands. The Gate may also r
 
 Provider credentials are read from environment variables and may be inherited by child processes. A compromised dependency, worker harness, target-project script, or redirected provider endpoint could attempt to read or exfiltrate them. Use narrowly scoped credentials, separate development accounts where possible, and rotate a credential after suspected exposure.
 
-### Network requests
+### Network requests and provider failover
 
-The router calls configured Qwen, DeepSeek, and xAI-compatible endpoints. Configuration or dependency compromise could redirect traffic or send unintended context. Verify endpoints, review what is included in tasks, and do not send private repositories or account data without authorization.
+The cluster can call configured Zhipu, OpenRouter, Cloudflare, Groq, ModelScope, NVIDIA, Mistral, Gemini, SiliconFlow, OpenAI, xAI, Qwen, DeepSeek, and compatible endpoints. Configuration or dependency compromise could redirect traffic or send unintended context. Verify endpoints, review task content, and do not send private repositories or account data without authorization. Authentication and permission failures intentionally stop routing; do not weaken this boundary to increase availability.
+
+### Local state and Mission Control
+
+Provider/model identifiers, counters, status classes, cooldowns, and sanitized orchestration events may be stored locally. Mission Control binds only to `127.0.0.1` and must not expose credentials, prompts, raw responses, private artifacts, or hidden reasoning. Treat changes to event serialization, redaction, binding, or static asset serving as security-sensitive.
 
 ### Logs and artifacts
 
