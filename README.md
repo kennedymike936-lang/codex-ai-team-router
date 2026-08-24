@@ -2,7 +2,7 @@
 
 **GLM-first, free-tier-aware multi-provider inference for Codex — with an optional bounded AI Team execution plane.**
 
-[![Version](https://img.shields.io/badge/version-1.0.0-00d8ff)](https://github.com/kennedymike936-lang/codex-ai-team-router/releases/tag/v1.0.0)
+[![Version](https://img.shields.io/badge/version-1.0.1-00d8ff)](https://github.com/kennedymike936-lang/codex-ai-team-router/releases/tag/v1.0.1)
 [![License: MIT](https://img.shields.io/badge/license-MIT-8cff72)](LICENSE)
 [![Node.js 20+](https://img.shields.io/badge/node-%3E%3D20-7ccf6b)](mcp-server/package.json)
 [![Platform](https://img.shields.io/badge/workers-Windows%20PowerShell-4f8cff)](scripts/)
@@ -238,7 +238,7 @@ Live probes are separate opt-in commands and can consume provider quota.
 1. Pull the new default branch and run `install.ps1` again.
 2. Rename the Codex MCP entry from `ai_team_mcp` to `ai_cluster_mcp` when adopting the new example.
 3. If using `-DeployRoot`, update the server path from `ai-team-mcp-server` to `ai-cluster-mcp-server`.
-4. Restart Codex so it loads MCP server identity `ai-cluster-mcp-server` version `1.0.0`.
+4. Restart Codex so it loads MCP server identity `ai-cluster-mcp-server` version `1.0.1`.
 5. Keep existing `AI_TEAM_*` environment variables for now; v1.0 retains them as compatibility names.
 6. Review paid fallback settings. DeepSeek no longer participates in automatic routing unless explicitly enabled for that request.
 

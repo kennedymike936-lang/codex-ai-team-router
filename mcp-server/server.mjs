@@ -927,7 +927,7 @@ const tools = [
 ];
 
 const server = new Server(
-  { name: "ai-cluster-mcp-server", version: "1.0.0" },
+  { name: "ai-cluster-mcp-server", version: "1.0.1" },
   { capabilities: { tools: {} } },
 );
 

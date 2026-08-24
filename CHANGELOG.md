@@ -4,6 +4,16 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-08-24
+
+### Fixed
+
+- Added an explicit UTF-8 BOM to the two synchronized `codex-worker.ps1` copies so Windows PowerShell 5.1 parses the non-ASCII failure-classification expression correctly on English GitHub-hosted runners.
+
+### Changed
+
+- Marked v1.0.1 as the recommended build without changing the v1.0 routing architecture or provider policy.
+
 ## [1.0.0] - 2026-08-23
 
 ### Added
@@ -57,6 +67,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 This entry records the version declared by the earlier package metadata; it does not claim that a GitHub Release was published on that date.
 
-[Unreleased]: https://github.com/kennedymike936-lang/codex-ai-team-router/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/kennedymike936-lang/codex-ai-team-router/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/kennedymike936-lang/codex-ai-team-router/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/kennedymike936-lang/codex-ai-team-router/releases/tag/v1.0.0
 [0.6.0]: https://github.com/kennedymike936-lang/codex-ai-team-router/tree/caf8a06

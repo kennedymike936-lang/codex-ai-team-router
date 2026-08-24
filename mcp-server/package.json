@@ -1,6 +1,6 @@
 {
   "name": "codex-ai-cluster-router",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "GLM-first, free-tier-aware multi-provider AI cluster for Codex, with an optional bounded AI Team execution plane.",
   "type": "module",
   "private": true,
