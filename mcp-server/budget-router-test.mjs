@@ -122,6 +122,66 @@ assert.deepEqual(preferredModelsForProvider("openrouter"), [
 ]);
 assert.deepEqual(preferredModelsForProvider("unknown"), []);
 
+{
+  // Groq free-tier preferred model order
+  const groqPreferred = preferredModelsForProvider("groq");
+  assert.deepEqual(groqPreferred, [
+    "openai/gpt-oss-120b",
+    "qwen/qwen3.6-27b",
+    "openai/gpt-oss-20b",
+    "groq/compound",
+    "groq/compound-mini",
+  ]);
+}
+
+{
+  // Daily request limit caps for Groq free-tier models
+  const metadata = mergeBuiltinModelMetadata();
+  const entries = [
+    { id: "groq:openai/gpt-oss-120b", expectedLimit: 1000 },
+    { id: "groq:qwen/qwen3.6-27b", expectedLimit: 1000 },
+    { id: "groq:openai/gpt-oss-20b", expectedLimit: 1000 },
+    { id: "groq:groq/compound", expectedLimit: 250 },
+    { id: "groq:groq/compound-mini", expectedLimit: 250 },
+  ];
+  for (const entry of entries) {
+    assert.ok(metadata[entry.id], `${entry.id} must exist in BUILTIN_MODEL_METADATA`);
+    assert.equal(metadata[entry.id].daily_request_limit, entry.expectedLimit, `${entry.id} daily_request_limit`);
+    assert.equal(metadata[entry.id].context_length, 131_072, `${entry.id} context_length`);
+    assert.equal(metadata[entry.id].is_free, true, `${entry.id} is_free`);
+    assert.equal(metadata[entry.id].catalog_source, "official_free_plan_limits", `${entry.id} catalog_source`);
+    assert.equal(metadata[entry.id].catalog_updated_at, "2026-08-24", `${entry.id} catalog_updated_at`);
+  }
+}
+
+{
+  // GLM-4.7-Flash retains primary preference — paid containment rules untouched
+  assert.deepEqual(preferredModelsForProvider("zhipu"), ["glm-4.7-flash", "glm-4.6", "glm-4.5"]);
+  const metadata = mergeBuiltinModelMetadata();
+  const zhipuPrimary = metadata["zhipu:glm-4.7-flash"];
+  assert.ok(zhipuPrimary, "zhipu:glm-4.7-flash must exist");
+  assert.equal(zhipuPrimary.routing_priority, 25);
+}
+
+{
+  // Free-only eligibility: all five Groq models pass as confirmed-free
+  const router = createBudgetRouter({ modelMetadata: mergeBuiltinModelMetadata() });
+  const groqCandidates = [
+    candidate("openai/gpt-oss-120b", "groq", { pricing: { input: 0, output: 0 }, is_free: true, capabilities: ["code"] }),
+    candidate("qwen/qwen3.6-27b", "groq", { pricing: { input: 0, output: 0 }, is_free: true, capabilities: ["code"] }),
+    candidate("openai/gpt-oss-20b", "groq", { pricing: { input: 0, output: 0 }, is_free: true, capabilities: ["code"] }),
+    candidate("groq/compound", "groq", { pricing: { input: 0, output: 0 }, is_free: true, capabilities: ["code"] }),
+    candidate("groq/compound-mini", "groq", { pricing: { input: 0, output: 0 }, is_free: true, capabilities: ["code"] }),
+  ];
+  const route = router.route({ candidates: groqCandidates, mode: "free_only", requirements: { capabilities: ["code"] } });
+  assert.notEqual(route.selected, null, "one of the five Groq free models should be selected");
+  assert.ok(
+    ["openai/gpt-oss-120b", "qwen/qwen3.6-27b", "openai/gpt-oss-20b", "groq/compound", "groq/compound-mini"].includes(route.selected.id),
+    `selected model ${route.selected.id} must be one of the five Groq free-tier models`,
+  );
+  assert.equal(route.excluded.length, 0, "no excluded Groq free-tier models in free_only mode");
+}
+
 for (const spec of [
   ["zhipu", "https://open.bigmodel.cn/api/paas/v4/models"],
   ["modelscope", "https://api-inference.modelscope.cn/v1/models"],

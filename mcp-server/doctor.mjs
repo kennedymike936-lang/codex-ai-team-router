@@ -97,6 +97,15 @@ export function runDoctor(options = {}) {
   const platform = options.platform || process.platform;
   const envPresence = options.envPresence || ((name) => defaultEnvPresence(name, env, exec, platform));
   const systemProxyPresence = options.systemProxyPresence ?? defaultSystemProxyPresence(exec, platform);
+  const runtimeIdentity = options.runtimeIdentity || {
+    server_name: "ai-cluster-mcp-server",
+    version: null,
+    build_id: null,
+    pid: process.pid,
+    started_at: new Date(Date.now() - process.uptime() * 1000).toISOString(),
+    source_mtime_at_start: null,
+    script_path: process.argv[1] || null,
+  };
 
   const findings = [];
   const add = (severity, message, suggestion = null) => {
@@ -181,6 +190,7 @@ export function runDoctor(options = {}) {
   );
 
   return {
+    runtime_identity: runtimeIdentity,
     summary,
     runtime,
     harness,

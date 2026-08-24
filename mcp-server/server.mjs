@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { statSync } from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -20,6 +21,19 @@ import { runRoutineWorkpack } from "./routine-workpack.mjs";
 import { createFabricStateStore } from "./fabric-state.mjs";
 import { createMissionControl } from "./mission-control.mjs";
 
+const SERVER_NAME = "ai-cluster-mcp-server";
+const SERVER_VERSION = "1.0.1";
+const SERVER_BUILD_ID = "20260824-groq-proxy-first-r2";
+const SERVER_RUNTIME_IDENTITY = Object.freeze({
+  server_name: SERVER_NAME,
+  version: SERVER_VERSION,
+  build_id: SERVER_BUILD_ID,
+  pid: process.pid,
+  started_at: new Date(Date.now() - process.uptime() * 1000).toISOString(),
+  source_mtime_at_start: statSync(new URL(import.meta.url)).mtime.toISOString(),
+  script_path: process.argv[1] || null,
+});
+
 const DEFAULT_CHECKLIST = [
   "code can run/build",
   "tests pass",
@@ -31,8 +45,7 @@ const DEFAULT_CHECKLIST = [
   "no API key or secret touched",
 ];
 
-function readUserEnv(name) {
-  if (process.env[name]) return process.env[name];
+function readWindowsUserEnv(name) {
   try {
     const output = execFileSync(
       "powershell.exe",
@@ -47,6 +60,15 @@ function readUserEnv(name) {
   } catch {
     return "";
   }
+}
+
+function readUserEnv(name) {
+  if (process.env[name]) return process.env[name];
+  return readWindowsUserEnv(name);
+}
+
+function readFreshUserEnv(name) {
+  return readWindowsUserEnv(name) || process.env[name] || "";
 }
 
 function qwenConfig() {
@@ -112,7 +134,9 @@ function openRouterConfig() {
 
 function groqConfig() {
   return {
-    apiKey: readUserEnv("GROQ_API_KEY"),
+    // Prefer the current user-scoped value so key rotation works even when
+    // Codex hot-reloads MCP servers without refreshing its parent environment.
+    apiKey: readFreshUserEnv("GROQ_API_KEY"),
     baseUrl: process.env.GROQ_BASE_URL || process.env.GROQ_MCP_BASE_URL || "https://api.groq.com/openai/v1",
   };
 }
@@ -927,7 +951,7 @@ const tools = [
 ];
 
 const server = new Server(
-  { name: "ai-cluster-mcp-server", version: "1.0.1" },
+  { name: SERVER_NAME, version: SERVER_VERSION },
   { capabilities: { tools: {} } },
 );
 
@@ -1066,7 +1090,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 
   if (name === "doctor") {
-    return result(JSON.stringify(runDoctor(), null, 2));
+    return result(JSON.stringify(runDoctor({ runtimeIdentity: SERVER_RUNTIME_IDENTITY }), null, 2));
   }
 
   if (name === "mission_control") {

@@ -23,10 +23,26 @@ const env = {
   NO_PROXY: "localhost,127.0.0.1",
 };
 
-const result = runDoctor({ env, exec: fakeExec, platform: "win32", systemProxyPresence: false });
+const testRuntimeIdentity = {
+  server_name: "ai-cluster-mcp-server",
+  version: "1.0.1",
+  build_id: "test-build",
+  pid: 4242,
+  started_at: "2026-08-24T00:00:00.000Z",
+  source_mtime_at_start: "2026-08-24T00:00:00.000Z",
+  script_path: "D:\\AI-Team\\ai-cluster-mcp-server\\server.mjs",
+};
+const result = runDoctor({
+  env,
+  exec: fakeExec,
+  platform: "win32",
+  systemProxyPresence: false,
+  runtimeIdentity: testRuntimeIdentity,
+});
 const json = JSON.stringify(result);
 
 // Structured runtime + harness availability.
+assert.deepEqual(result.runtime_identity, testRuntimeIdentity);
 assert.deepEqual(
   result.runtime.map((r) => [r.check, r.available, r.version]),
   [

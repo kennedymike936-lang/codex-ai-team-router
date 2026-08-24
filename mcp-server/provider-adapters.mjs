@@ -15,7 +15,13 @@ export const PROVIDER_PREFERRED_MODELS = Object.freeze({
     "cohere/north-mini-code:free",
     "nvidia/nemotron-3-ultra-550b-a55b:free",
   ]),
-  groq: Object.freeze(["openai/gpt-oss-120b", "qwen/qwen3.6-27b"]),
+  groq: Object.freeze([
+    "openai/gpt-oss-120b",
+    "qwen/qwen3.6-27b",
+    "openai/gpt-oss-20b",
+    "groq/compound",
+    "groq/compound-mini",
+  ]),
   zhipu: Object.freeze(["glm-4.7-flash", "glm-4.6", "glm-4.5"]),
   modelscope: Object.freeze([
     "ZhipuAI/GLM-4.7-Flash",
@@ -143,6 +149,7 @@ export function normalizeOpenRouterModel(raw, override = {}) {
 export const GROQ_CAPABILITY_CATALOG = {
   "groq/compound": { capabilities: ["code", "tools", "web"] },
   "groq/compound-mini": { capabilities: ["code", "tools", "web"] },
+  "openai/gpt-oss-20b": { capabilities: ["code", "tools"], context_length: 131072 },
 };
 
 export function groqCapabilities(modelId, overrides = {}) {
@@ -278,6 +285,12 @@ function createOpenAiCompatibleAdapter({
   requiresApiKey = true,
   fetchImpl = fetch,
 } = {}) {
+  // Groq may return a regional HTTP 403 on the direct route. Prefer an
+  // administrator-configured trusted proxy for Groq only; the resilient
+  // transport still falls back to direct on a safe pre-connect failure.
+  const providerNetworkOptions = provider === "groq"
+    ? { aiTeamProxyMode: "always" }
+    : {};
   return {
     provider,
     protocol: "openai_chat_completions",
@@ -286,7 +299,10 @@ function createOpenAiCompatibleAdapter({
 
     async discoverModels({ baseUrl = defaultBaseUrl, apiKey, metadata = {}, capabilityCatalog = {} } = {}) {
       const root = requireBaseUrl(baseUrl, provider);
-      const response = await this.fetchImpl(`${root}${modelListPath}`, { headers: bearerHeaders(apiKey) });
+      const response = await this.fetchImpl(`${root}${modelListPath}`, {
+        ...providerNetworkOptions,
+        headers: bearerHeaders(apiKey),
+      });
       if (!response.ok) {
         const body = await response.text();
         throw new Error(redactKeys(`${provider} model discovery failed (${response.status}): ${body.slice(0, 300)}`, [apiKey]));
@@ -315,6 +331,7 @@ function createOpenAiCompatibleAdapter({
         body.thinking = { type: thinking };
       }
       const response = await this.fetchImpl(`${root}/chat/completions`, {
+        ...providerNetworkOptions,
         method: "POST",
         headers: { "content-type": "application/json", ...bearerHeaders(apiKey) },
         body: JSON.stringify(body),

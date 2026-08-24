@@ -39,6 +39,7 @@ try {
     npm install
   }
   npm test
+  npm run self-check
 } finally {
   Pop-Location
 }
@@ -55,3 +56,6 @@ if (-not [string]::IsNullOrWhiteSpace($DeployRoot)) {
 }
 Write-Host ""
 Write-Host "Next: add the TOML snippet from examples\config.toml.example to your Codex config."
+Write-Host "IMPORTANT: after MCP source, path, or config changes, open Settings > MCP servers > Restart."
+Write-Host "Restarting only a task or closing a window does not prove the STDIO MCP process restarted."
+Write-Host "After Restart, ask Codex to compare doctor.runtime_identity.build_id and PID with npm run self-check."

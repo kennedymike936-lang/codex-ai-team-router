@@ -23,6 +23,7 @@
   },
   "scripts": {
     "start": "node server.mjs",
+    "self-check": "node self-check.mjs",
     "smoke": "node smoke-test.mjs",
     "probe:live": "node live-model-probe.mjs",
     "probe:xai": "node xai-mcp-live-probe.mjs",

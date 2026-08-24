@@ -4,6 +4,21 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+### Added
+
+- Added root `AGENTS.md` instructions that require Codex to run a deterministic post-clone/post-pull self-check before implementation.
+- Added `npm run self-check`, which starts a fresh local MCP process, validates package/runtime/build identity, runs `doctor`, and optionally performs Groq model discovery without chat inference.
+
+### Fixed
+
+- Added active runtime PID, start time, source modification time, script path, and build ID to `doctor` so stale MCP processes are directly observable.
+- Made Groq refresh its Windows user-scoped credential on each route and prefer an administrator-configured trusted proxy, fixing regional direct-route HTTP 403 failures without forcing GLM or other providers through that proxy.
+
+### Changed
+
+- Documented that MCP source, path, configuration, and deployment changes require **Settings > MCP servers > Restart**; restarting only a task or closing a window is not sufficient verification.
+- The installer now runs the self-check and prints the mandatory MCP restart and PID/build verification notice.
+
 ## [1.0.1] - 2026-08-24
 
 ### Fixed

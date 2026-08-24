@@ -172,17 +172,23 @@ export function createResilientFetch({
 
   return async function resilientFetch(url, options = {}) {
     const method = String(options.method || "GET").toUpperCase();
+    const requestedRouteMode = String(options.aiTeamProxyMode || "").trim().toLowerCase();
+    const routeMode = proxy.mode !== "off" && ["fallback", "always"].includes(requestedRouteMode)
+      ? requestedRouteMode
+      : proxy.mode;
+    const baseRequestOptions = { ...options };
+    delete baseRequestOptions.aiTeamProxyMode;
     const proxyRoutes = proxy.proxies.map((config, index) => ({ kind: "proxy", config, index }));
-    const attemptRoutes = proxy.enabled && proxy.mode === "always"
+    const attemptRoutes = proxy.enabled && routeMode === "always"
       ? [...proxyRoutes, { kind: "direct" }]
-      : proxy.enabled && proxy.mode === "fallback"
+      : proxy.enabled && routeMode === "fallback"
         ? [{ kind: "direct" }, ...proxyRoutes]
         : [{ kind: "direct" }, { kind: "direct" }];
     let lastClassification = null;
 
     for (let attempt = 0; attempt < attemptRoutes.length; attempt += 1) {
       const route = attemptRoutes[attempt];
-      const requestOptions = { ...options };
+      const requestOptions = { ...baseRequestOptions };
       if (route.kind === "proxy") {
         if (!proxyDispatchers.has(route.index)) {
           proxyDispatchers.set(route.index, dispatcherFactory({ ...route.config, noProxy: proxy.noProxy }));

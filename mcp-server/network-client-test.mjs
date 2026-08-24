@@ -94,6 +94,28 @@ assert.equal(trustedProxyConfig({ ALL_PROXY: "socks5://127.0.0.1:1080" }).enable
 }
 
 {
+  const routes = [];
+  const fetchWithProviderProxyPreference = createResilientFetch({
+    fetchImpl: async (_url, options) => {
+      assert.equal(options.aiTeamProxyMode, undefined);
+      routes.push(options.dispatcher ? "proxy" : "direct");
+      return new Response(options.dispatcher ? "ok" : "forbidden", {
+        status: options.dispatcher ? 200 : 403,
+      });
+    },
+    env: { HTTPS_PROXY: "http://127.0.0.1:7890", AI_TEAM_PROXY_MODE: "fallback" },
+    sleepImpl: async () => {},
+    dispatcherFactory: () => ({ trusted: true }),
+  });
+  const response = await fetchWithProviderProxyPreference(
+    "https://api.groq.com/openai/v1/models",
+    { aiTeamProxyMode: "always" },
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(routes, ["proxy"]);
+}
+
+{
   let calls = 0;
   const fetchWithRetry = createResilientFetch({
     fetchImpl: async () => {
@@ -131,4 +153,4 @@ assert.equal(trustedProxyConfig({ ALL_PROXY: "socks5://127.0.0.1:1080" }).enable
   assert.equal(calls, 1);
 }
 
-console.log("Network client: 15 diagnosis, retry, and trusted-proxy scenarios passed");
+console.log("Network client: 16 diagnosis, retry, and trusted-proxy scenarios passed");

@@ -115,7 +115,7 @@ cd codex-ai-team-router
 powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-The installer uses the lockfile, runs the offline test suite, and prints the absolute Node and MCP server paths.
+The installer uses the lockfile, runs the offline test suite, runs `npm run self-check`, and prints the absolute Node and MCP server paths.
 
 To create a separate runtime copy:
 
@@ -160,7 +160,19 @@ Credentials are read from the Codex process environment or the Windows user envi
 | DeepSeek execution worker | `DEEPSEEK_API_KEY`, `ANTHROPIC_API_KEY`, or `ANTHROPIC_AUTH_TOKEN` |
 | Grok research | `XAI_API_KEY` |
 
-Restart Codex after changing user-scoped environment variables.
+### MCP restart is part of deployment
+
+After changing MCP source files, the configured server path, MCP environment settings, or deployed runtime files, open **Settings > MCP servers > Restart**. Restarting only the current Codex task or closing a window may leave the existing STDIO child process alive.
+
+Do not assume the restart succeeded. Ask Codex to call `doctor` and verify that:
+
+- `runtime_identity.pid` changed after the update;
+- `runtime_identity.build_id` matches the `expected_build_id` from `npm run self-check`;
+- `runtime_identity.source_mtime_at_start` is not older than the deployed server source.
+
+If Groq is configured, finish with a no-inference `budget_route` dry run restricted to `providers: ["groq"]`. A healthy result selects a model and has no Groq provider exclusion. The cluster's Groq adapter prefers an administrator-configured trusted proxy because direct regional routes may return HTTP 403.
+
+The root [AGENTS.md](AGENTS.md) makes this self-check mandatory for Codex after a fresh clone or pull. The self-check never prints credential values and performs no provider inference unless `--live-groq` is explicitly supplied; even then it only requests the model catalog.
 
 ## Route examples
 
@@ -229,6 +241,7 @@ The default suite is offline and does not intentionally call provider APIs:
 cd mcp-server
 npm ci
 npm test
+npm run self-check
 ```
 
 Live probes are separate opt-in commands and can consume provider quota.
@@ -238,7 +251,7 @@ Live probes are separate opt-in commands and can consume provider quota.
 1. Pull the new default branch and run `install.ps1` again.
 2. Rename the Codex MCP entry from `ai_team_mcp` to `ai_cluster_mcp` when adopting the new example.
 3. If using `-DeployRoot`, update the server path from `ai-team-mcp-server` to `ai-cluster-mcp-server`.
-4. Restart Codex so it loads MCP server identity `ai-cluster-mcp-server` version `1.0.1`.
+4. Open **Settings > MCP servers > Restart**, then verify a new PID and matching build ID with `doctor` and `npm run self-check`.
 5. Keep existing `AI_TEAM_*` environment variables for now; v1.0 retains them as compatibility names.
 6. Review paid fallback settings. DeepSeek no longer participates in automatic routing unless explicitly enabled for that request.
 
